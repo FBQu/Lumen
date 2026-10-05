@@ -2,6 +2,7 @@ add_executable(LumenTests
     TestMain.cpp
     CoreTests.cpp
     SceneTests.cpp
+    ScriptingTests.cpp
 )
 target_link_libraries(LumenTests PRIVATE LumenCore doctest::doctest)
 

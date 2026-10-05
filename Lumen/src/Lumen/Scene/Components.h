@@ -34,4 +34,11 @@ namespace Lumen {
 		}
 	};
 
+	// Attaches a Lua script to an entity. The script is a chunk that returns a table of callbacks:
+	// OnCreate(entity), OnUpdate(entity, dt), OnDestroy(entity). All callbacks are optional.
+	struct ScriptComponent
+	{
+		std::string Source;
+	};
+
 }
