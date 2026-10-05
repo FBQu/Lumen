@@ -9,6 +9,7 @@
 namespace Lumen {
 
 	class Scene;
+	class PhysicsWorld;
 
 	// Hosts the Lua state for one running Scene and drives ScriptComponent callbacks.
 	// Scripts run sandboxed: only base, math, string, table, utf8 and coroutine libraries are available.
@@ -20,8 +21,9 @@ namespace Lumen {
 		ScriptEngine(const ScriptEngine&) = delete;
 		ScriptEngine& operator=(const ScriptEngine&) = delete;
 
-		// Binds the engine to a scene. Must be paired with Stop().
-		void Start(Scene& scene);
+		// Binds the engine to a scene. Must be paired with Stop(). If a PhysicsWorld is given, scripts
+		// can use the global Physics table and entity:AddRigidbody / entity:AddCollider.
+		void Start(Scene& scene, PhysicsWorld* physics = nullptr);
 		// Calls OnDestroy on all live scripts and releases script state.
 		void Stop();
 		// Instantiates new scripts (OnCreate) and calls OnUpdate on every script instance.

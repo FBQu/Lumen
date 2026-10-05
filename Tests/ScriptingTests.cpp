@@ -249,3 +249,122 @@ TEST_CASE("Restarting the engine yields a fresh Lua state")
 	CHECK(engine.Execute("assert(Leaked == nil)"));
 	engine.Stop();
 }
+
+// ---------------------------------------------------------------------------------------------
+// Physics bindings
+// ---------------------------------------------------------------------------------------------
+
+#include "Lumen/Physics/PhysicsWorld.h"
+
+namespace {
+
+	void RunFrames(ScriptEngine& scripts, PhysicsWorld& physics, int frames)
+	{
+		for (int i = 0; i < frames; i++)
+		{
+			scripts.Update(PhysicsWorld::s_FixedTimestep);
+			physics.Step(PhysicsWorld::s_FixedTimestep);
+		}
+	}
+
+}
+
+TEST_CASE("Scripts can build physics entities and they simulate")
+{
+	Scene scene;
+	AddScript(scene, "Spawner", R"(
+		return { OnCreate = function(self)
+			local ground = Scene.CreateEntity("Ground")
+			ground.Transform.Translation = vec3.new(0, -0.5, 0)
+			ground:AddCollider({ Shape = "box", HalfExtents = vec3.new(50, 0.5, 50) })
+
+			local ball = Scene.CreateEntity("Ball")
+			ball.Transform.Translation = vec3.new(0, 4, 0)
+			ball:AddCollider({ Shape = "sphere", Radius = 0.5 })
+			ball:AddRigidbody({ Type = "dynamic", Mass = 2, Restitution = 0.0 })
+			assert(ball:HasCollider() and ball:HasRigidbody() and not ground:HasRigidbody())
+		end }
+	)");
+
+	PhysicsWorld physics;
+	ScriptEngine scripts;
+	physics.Start(scene);
+	scripts.Start(scene, &physics);
+	RunFrames(scripts, physics, 240);
+
+	Entity ball = scene.FindEntityByName("Ball");
+	REQUIRE(ball.IsValid());
+	CHECK(ball.GetComponent<TransformComponent>().Translation.y == doctest::Approx(0.5f).epsilon(0.05));
+	CHECK(physics.GetBodyCount() == 2);
+
+	scripts.Stop();
+	physics.Stop();
+}
+
+TEST_CASE("Lua Physics API: forces, impulses, velocity, gravity and raycasts")
+{
+	Scene scene;
+	Entity ground = scene.CreateEntity("Ground");
+	ground.GetComponent<TransformComponent>().Translation = { 0.0f, -0.5f, 0.0f };
+	ground.AddComponent<ColliderComponent>().HalfExtents = { 50.0f, 0.5f, 50.0f };
+	Entity ball = scene.CreateEntity("Ball");
+	ball.GetComponent<TransformComponent>().Translation = { 0.0f, 10.0f, 0.0f };
+	ball.AddComponent<ColliderComponent>().Shape = ColliderShape::Sphere;
+	ball.AddComponent<RigidbodyComponent>().GravityScale = 0.0f;
+
+	PhysicsWorld physics;
+	ScriptEngine scripts;
+	physics.Start(scene);
+	scripts.Start(scene, &physics);
+
+	CHECK(scripts.Execute(R"(
+		local g = Physics.GetGravity()
+		assert(math.abs(g.y + 9.81) < 1e-4)
+		Physics.SetGravity(vec3.new(0, -1, 0))
+		assert(Physics.GetGravity().y == -1)
+		Physics.SetGravity(vec3.new(0, -9.81, 0))
+
+		local ball = Scene.FindEntityByName("Ball")
+		assert(Physics.AddImpulse(ball, vec3.new(0, 0, 3)))
+		assert(math.abs(Physics.GetVelocity(ball).z - 3) < 1e-4)
+		assert(Physics.SetVelocity(ball, vec3.new(0, 0, 0)))
+		assert(Physics.AddForce(ball, vec3.new(1, 0, 0)))
+		assert(not Physics.AddForce(Scene.FindEntityByName("Ground"), vec3.new(1, 0, 0)))
+
+		local hit = Physics.Raycast(vec3.new(5, 10, 0), vec3.new(0, -1, 0), 50)
+		assert(hit ~= nil)
+		assert(hit.Entity == Scene.FindEntityByName("Ground"))
+		assert(math.abs(hit.Distance - 10) < 1e-3)
+		assert(math.abs(hit.Normal.y - 1) < 1e-4)
+		assert(Physics.Raycast(vec3.new(5, 10, 0), vec3.new(0, 1, 0), 50) == nil)
+	)"));
+
+	scripts.Stop();
+	physics.Stop();
+}
+
+TEST_CASE("Invalid physics options raise Lua errors; Physics table needs a world")
+{
+	LogCapture capture;
+	Scene scene;
+	scene.CreateEntity("E");
+
+	{
+		PhysicsWorld physics;
+		ScriptEngine scripts;
+		physics.Start(scene);
+		scripts.Start(scene, &physics);
+		CHECK_FALSE(scripts.Execute("Scene.FindEntityByName('E'):AddRigidbody({ Type = 'bogus' })"));
+		CHECK(capture.Contains(LogLevel::Error, "invalid body type"));
+		CHECK_FALSE(scripts.Execute("Scene.FindEntityByName('E'):AddCollider({ Shape = 'torus' })"));
+		CHECK(capture.Contains(LogLevel::Error, "invalid collider shape"));
+		scripts.Stop();
+		physics.Stop();
+	}
+
+	ScriptEngine scripts;
+	scripts.Start(scene); // no physics world
+	CHECK(scripts.Execute("assert(Physics == nil)"));
+	CHECK(scripts.Execute("Scene.FindEntityByName('E'):AddCollider()")); // components still usable
+	scripts.Stop();
+}

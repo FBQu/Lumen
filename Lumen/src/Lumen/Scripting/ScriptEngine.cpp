@@ -1,12 +1,14 @@
 #include "Lumen/Scripting/ScriptEngine.h"
 
 #include "Lumen/Core/Log.h"
+#include "Lumen/Physics/PhysicsWorld.h"
 #include "Lumen/Scene/Entity.h"
 #include "Lumen/Scene/Scene.h"
 
 #include <sol/sol.hpp>
 
 #include <optional>
+#include <stdexcept>
 #include <unordered_map>
 #include <vector>
 
@@ -75,6 +77,88 @@ namespace Lumen {
 			log["Error"] = [](const std::string& message) { Log::Write(LogLevel::Error, message); };
 		}
 
+		BodyType ParseBodyType(const std::string& name)
+		{
+			if (name == "static")    return BodyType::Static;
+			if (name == "kinematic") return BodyType::Kinematic;
+			if (name == "dynamic")   return BodyType::Dynamic;
+			throw std::runtime_error("invalid body type '" + name + "' (expected static, kinematic or dynamic)");
+		}
+
+		ColliderShape ParseShape(const std::string& name)
+		{
+			if (name == "box")     return ColliderShape::Box;
+			if (name == "sphere")  return ColliderShape::Sphere;
+			if (name == "capsule") return ColliderShape::Capsule;
+			throw std::runtime_error("invalid collider shape '" + name + "' (expected box, sphere or capsule)");
+		}
+
+		void BindPhysics(sol::state& lua, PhysicsWorld* physics)
+		{
+			lua["Entity"]["AddRigidbody"] = [](Entity& entity, sol::optional<sol::table> options)
+			{
+				RigidbodyComponent rigidbody;
+				if (options)
+				{
+					sol::table o = *options;
+					if (sol::optional<std::string> type = o["Type"])
+						rigidbody.Type = ParseBodyType(*type);
+					rigidbody.Mass = o.get_or("Mass", rigidbody.Mass);
+					rigidbody.Friction = o.get_or("Friction", rigidbody.Friction);
+					rigidbody.Restitution = o.get_or("Restitution", rigidbody.Restitution);
+					rigidbody.GravityScale = o.get_or("GravityScale", rigidbody.GravityScale);
+					rigidbody.LinearDamping = o.get_or("LinearDamping", rigidbody.LinearDamping);
+					rigidbody.AngularDamping = o.get_or("AngularDamping", rigidbody.AngularDamping);
+					rigidbody.FixedRotation = o.get_or("FixedRotation", rigidbody.FixedRotation);
+				}
+				entity.AddOrReplaceComponent<RigidbodyComponent>(rigidbody);
+			};
+
+			lua["Entity"]["AddCollider"] = [](Entity& entity, sol::optional<sol::table> options)
+			{
+				ColliderComponent collider;
+				if (options)
+				{
+					sol::table o = *options;
+					if (sol::optional<std::string> shape = o["Shape"])
+						collider.Shape = ParseShape(*shape);
+					collider.HalfExtents = o.get_or("HalfExtents", collider.HalfExtents);
+					collider.Radius = o.get_or("Radius", collider.Radius);
+					collider.HalfHeight = o.get_or("HalfHeight", collider.HalfHeight);
+					collider.Offset = o.get_or("Offset", collider.Offset);
+				}
+				entity.AddOrReplaceComponent<ColliderComponent>(collider);
+			};
+
+			lua["Entity"]["HasRigidbody"] = [](const Entity& entity) { return entity.HasComponent<RigidbodyComponent>(); };
+			lua["Entity"]["HasCollider"] = [](const Entity& entity) { return entity.HasComponent<ColliderComponent>(); };
+
+			if (physics == nullptr)
+				return;
+
+			sol::table table = lua.create_named_table("Physics");
+			table["SetGravity"] = [physics](const glm::vec3& gravity) { physics->SetGravity(gravity); };
+			table["GetGravity"] = [physics]() { return physics->GetGravity(); };
+			table["AddForce"] = [physics](const Entity& e, const glm::vec3& force) { return physics->AddForce(e, force); };
+			table["AddImpulse"] = [physics](const Entity& e, const glm::vec3& impulse) { return physics->AddImpulse(e, impulse); };
+			table["SetVelocity"] = [physics](const Entity& e, const glm::vec3& velocity) { return physics->SetLinearVelocity(e, velocity); };
+			table["GetVelocity"] = [physics](const Entity& e) { return physics->GetLinearVelocity(e); };
+			table["Raycast"] = [physics](sol::this_state state, const glm::vec3& origin, const glm::vec3& direction, float maxDistance) -> sol::object
+			{
+				sol::state_view lua(state);
+				std::optional<RaycastHit> hit = physics->Raycast(origin, direction, maxDistance);
+				if (!hit)
+					return sol::nil;
+
+				sol::table result = lua.create_table();
+				result["Entity"] = hit->HitEntity;
+				result["Point"] = hit->Point;
+				result["Normal"] = hit->Normal;
+				result["Distance"] = hit->Distance;
+				return result;
+			};
+		}
+
 		void BindScene(sol::state& lua, Scene* scene)
 		{
 			sol::table table = lua.create_named_table("Scene");
@@ -111,7 +195,7 @@ namespace Lumen {
 		Scene* ScenePtr = nullptr;
 		std::unordered_map<UUID, Instance> Instances;
 
-		void Reset(Scene* scene)
+		void Reset(Scene* scene, PhysicsWorld* physics)
 		{
 			ScenePtr = scene;
 			Lua = CreateScope<sol::state>();
@@ -121,6 +205,7 @@ namespace Lumen {
 			BindEntity(*Lua);
 			BindLog(*Lua);
 			BindScene(*Lua, scene);
+			BindPhysics(*Lua, physics);
 		}
 
 		void Fault(const Entity& entity, Instance& instance, const char* what, const sol::error& error)
@@ -188,11 +273,11 @@ namespace Lumen {
 			Stop();
 	}
 
-	void ScriptEngine::Start(Scene& scene)
+	void ScriptEngine::Start(Scene& scene, PhysicsWorld* physics)
 	{
 		LM_ASSERT(!IsRunning(), "ScriptEngine already started");
 		m_Scene = &scene;
-		m_Impl->Reset(&scene);
+		m_Impl->Reset(&scene, physics);
 		scene.GetRegistry().on_destroy<ScriptComponent>().connect<&Impl::OnScriptDestroyed>(*m_Impl);
 	}
 
