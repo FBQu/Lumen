@@ -30,6 +30,6 @@ ctest --test-dir build --output-on-failure
 - `Tests/` doctest unit tests, one file per module. GPU-free logic must be unit tested.
 
 ## Roadmap
-1. Core + ECS (done) 2. Lua scripting API (done: lifecycle, vec3, Transform, Scene API, sandbox; TODO: instruction-count limit, more components) 3. Physics (Jolt) 4. Agent control API
+1. Core + ECS (done) 2. Lua scripting API (done: lifecycle, vec3, Transform, Scene API, sandbox; TODO: instruction-count limit, more components) 3. Physics (Jolt) (done: bodies, forces, raycast, tests; TODO: collision events, triggers, Lua API, rebuild on component change) 4. Agent control API
 5. Renderer (GLFW, nvrhi/Vulkan, glTF, PBR, IBL, shadows, SSAO, HDR) 6. Editor + export
 7. Test scene exercising every component and the full scripting API

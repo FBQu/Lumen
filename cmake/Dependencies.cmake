@@ -9,7 +9,20 @@ FetchContent_Declare(doctest GIT_REPOSITORY https://github.com/doctest/doctest.g
 FetchContent_Declare(lua   GIT_REPOSITORY https://github.com/lua/lua.git   GIT_TAG v5.4.8 GIT_SHALLOW ON SOURCE_SUBDIR _none)
 FetchContent_Declare(sol2  GIT_REPOSITORY https://github.com/ThePhD/sol2.git GIT_TAG v3.5.0 GIT_SHALLOW ON SOURCE_SUBDIR _none)
 
-FetchContent_MakeAvailable(glm entt lua sol2)
+FetchContent_Declare(JoltPhysics GIT_REPOSITORY https://github.com/jrouwe/JoltPhysics.git GIT_TAG v5.5.0 GIT_SHALLOW ON SOURCE_SUBDIR Build)
+
+set(TARGET_UNIT_TESTS OFF CACHE BOOL "" FORCE)
+set(TARGET_HELLO_WORLD OFF CACHE BOOL "" FORCE)
+set(TARGET_PERFORMANCE_TEST OFF CACHE BOOL "" FORCE)
+set(TARGET_SAMPLES OFF CACHE BOOL "" FORCE)
+set(TARGET_VIEWER OFF CACHE BOOL "" FORCE)
+set(INTERPROCEDURAL_OPTIMIZATION OFF CACHE BOOL "" FORCE)
+set(OVERRIDE_CXX_FLAGS OFF CACHE BOOL "" FORCE)
+set(CPP_RTTI_ENABLED ON CACHE BOOL "" FORCE)
+set(CPP_EXCEPTIONS_ENABLED ON CACHE BOOL "" FORCE)
+set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
+
+FetchContent_MakeAvailable(glm entt lua sol2 JoltPhysics)
 
 # Lua ships no CMake build; compile the interpreter core as a static C library (no lua.c / luac.c).
 # No platform defines on purpose: dlopen-based native module loading stays disabled.
