@@ -1,0 +1,8 @@
+{"cmd":"ping","requestId":1}
+{"cmd":"entity.create","args":{"name":"Ball","transform":{"translation":[0,5,0]},"collider":{"shape":"sphere","radius":0.5},"rigidbody":{"type":"dynamic"}}}
+{"cmd":"play.start"}
+{"cmd":"play.step","args":{"frames":60}}
+{"cmd":"entity.list"}
+{"cmd":"play.stop"}
+this is not json
+{"cmd":"nope"}

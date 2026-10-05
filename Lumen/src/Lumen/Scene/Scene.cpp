@@ -1,6 +1,8 @@
 #include "Lumen/Scene/Scene.h"
 #include "Lumen/Scene/Entity.h"
 
+#include <vector>
+
 namespace Lumen {
 
 	Entity Scene::CreateEntity(const std::string& name)
@@ -28,6 +30,15 @@ namespace Lumen {
 
 		m_EntityMap.erase(entity.GetUUID());
 		m_Registry.destroy(entity.GetHandle());
+	}
+
+	void Scene::Clear()
+	{
+		std::vector<entt::entity> handles;
+		for (auto [handle, id] : m_Registry.view<IDComponent>().each())
+			handles.push_back(handle);
+		for (entt::entity handle : handles)
+			DestroyEntity(Entity(handle, this));
 	}
 
 	Entity Scene::FindEntityByUUID(UUID uuid)

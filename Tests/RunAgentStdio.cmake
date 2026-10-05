@@ -1,0 +1,31 @@
+# Feeds a recorded session to LumenAgent and checks the responses line by line.
+execute_process(COMMAND ${AGENT} INPUT_FILE ${INPUT} OUTPUT_FILE ${OUTPUT_PATH} RESULT_VARIABLE RC)
+if(NOT RC EQUAL 0)
+    message(FATAL_ERROR "LumenAgent exited with ${RC}")
+endif()
+
+# file(STRINGS) keeps one element per line even when lines contain brackets or semicolons.
+file(STRINGS ${OUTPUT_PATH} LINES)
+file(REMOVE ${OUTPUT_PATH})
+list(LENGTH LINES COUNT)
+if(NOT COUNT EQUAL 8)
+    message(FATAL_ERROR "expected 8 responses, got ${COUNT}:\n${LINES}")
+endif()
+
+function(expect INDEX PATTERN)
+    list(GET LINES ${INDEX} LINE)
+    if(NOT LINE MATCHES "${PATTERN}")
+        message(FATAL_ERROR "response ${INDEX} did not match '${PATTERN}': ${LINE}")
+    endif()
+endfunction()
+
+expect(0 "\"ok\":true")
+expect(0 "\"requestId\":1")
+expect(0 "pong")
+expect(1 "\"ok\":true")
+expect(2 "\"playing\":true")
+expect(3 "\"frame\":60")
+expect(4 "Ball")
+expect(5 "\"playing\":false")
+expect(6 "invalid JSON")
+expect(7 "unknown command")

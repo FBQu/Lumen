@@ -345,17 +345,30 @@ namespace Lumen {
 		return m_Impl->Instances.size();
 	}
 
-	bool ScriptEngine::Execute(std::string_view code)
+	bool ScriptEngine::Execute(std::string_view code, std::string* output, std::string* error)
 	{
 		if (!IsRunning())
+		{
+			if (error)
+				*error = "script engine is not running";
 			return false;
+		}
 
 		sol::protected_function_result result = m_Impl->Lua->safe_script(code, sol::script_pass_on_error);
 		if (!result.valid())
 		{
-			sol::error error = result;
-			LM_ERROR("Lua error: {}", error.what());
+			sol::error failure = result;
+			LM_ERROR("Lua error: {}", failure.what());
+			if (error)
+				*error = failure.what();
 			return false;
+		}
+
+		if (output && result.return_count() > 0)
+		{
+			sol::protected_function tostring = (*m_Impl->Lua)["tostring"];
+			sol::object value = result.get<sol::object>();
+			*output = tostring(value).get<std::string>();
 		}
 		return true;
 	}

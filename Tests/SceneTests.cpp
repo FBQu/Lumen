@@ -95,3 +95,19 @@ TEST_CASE("Transform matrix composes translation, rotation and scale")
 	p = t.GetTransform() * glm::vec4(1.0f, 0.0f, 0.0f, 1.0f);
 	CHECK(glm::all(glm::epsilonEqual(glm::vec3(p), glm::vec3(1.0f, 2.0f, 1.0f), 1e-5f)));
 }
+
+TEST_CASE("Clear destroys every entity and frees their ids")
+{
+	Scene scene;
+	Entity a = scene.CreateEntityWithUUID(UUID(11), "A");
+	scene.CreateEntity("B");
+	scene.Clear();
+
+	CHECK(scene.GetEntityCount() == 0);
+	CHECK_FALSE(a.IsValid());
+	CHECK_FALSE(scene.FindEntityByUUID(UUID(11)).IsValid());
+	CHECK(scene.CreateEntityWithUUID(UUID(11), "Again").IsValid()); // id can be reused
+	scene.Clear(); // clearing an already-empty scene is fine
+	scene.Clear();
+	CHECK(scene.GetEntityCount() == 0);
+}

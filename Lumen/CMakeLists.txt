@@ -1,4 +1,5 @@
 add_library(LumenCore STATIC
+    src/Lumen/Agent/AgentSession.cpp
     src/Lumen/Core/Log.cpp
     src/Lumen/Core/UUID.cpp
     src/Lumen/Physics/PhysicsWorld.cpp

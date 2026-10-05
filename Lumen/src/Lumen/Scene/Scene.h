@@ -23,6 +23,7 @@ namespace Lumen {
 		Entity CreateEntity(const std::string& name = "Entity");
 		Entity CreateEntityWithUUID(UUID uuid, const std::string& name = "Entity");
 		void DestroyEntity(Entity entity);
+		void Clear(); // destroys every entity
 
 		Entity FindEntityByUUID(UUID uuid);
 		Entity FindEntityByName(const std::string& name);

@@ -12,6 +12,7 @@ option(LUMEN_BUILD_TESTS "Build Lumen unit tests" ON)
 include(cmake/Dependencies.cmake)
 
 add_subdirectory(Lumen)
+add_subdirectory(Apps/LumenAgent)
 
 if(LUMEN_BUILD_TESTS)
     enable_testing()

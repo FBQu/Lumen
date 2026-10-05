@@ -198,12 +198,14 @@ namespace Lumen {
 
 	}
 
-	std::string SceneSerializer::Serialize(const Scene& scene)
-	{
-		Json entities = Json::array();
+	namespace {
 
-		for (auto [handle, id, tag, transform] : scene.GetRegistry().view<const IDComponent, const TagComponent, const TransformComponent>().each())
+		Json EntityToJson(const entt::registry& registry, entt::entity handle)
 		{
+			const auto& id = registry.get<IDComponent>(handle);
+			const auto& tag = registry.get<TagComponent>(handle);
+			const auto& transform = registry.get<TransformComponent>(handle);
+
 			Json e;
 			e["id"] = std::to_string(static_cast<uint64_t>(id.ID));
 			e["name"] = tag.Tag;
@@ -211,23 +213,47 @@ namespace Lumen {
 			                   { "rotation", VecToJson(transform.Rotation) },
 			                   { "scale", VecToJson(transform.Scale) } };
 
-			if (const auto* rb = scene.GetRegistry().try_get<RigidbodyComponent>(handle))
+			if (const auto* rb = registry.try_get<RigidbodyComponent>(handle))
 			{
 				e["rigidbody"] = { { "type", ToString(rb->Type) }, { "mass", rb->Mass }, { "friction", rb->Friction },
 				                   { "restitution", rb->Restitution }, { "gravityScale", rb->GravityScale },
 				                   { "linearDamping", rb->LinearDamping }, { "angularDamping", rb->AngularDamping },
 				                   { "fixedRotation", rb->FixedRotation } };
 			}
-			if (const auto* c = scene.GetRegistry().try_get<ColliderComponent>(handle))
+			if (const auto* c = registry.try_get<ColliderComponent>(handle))
 			{
 				e["collider"] = { { "shape", ToString(c->Shape) }, { "halfExtents", VecToJson(c->HalfExtents) },
 				                  { "radius", c->Radius }, { "halfHeight", c->HalfHeight }, { "offset", VecToJson(c->Offset) } };
 			}
-			if (const auto* s = scene.GetRegistry().try_get<ScriptComponent>(handle))
-				e["script"] = { { "source", s->Source } };
-
-			entities.push_back(std::move(e));
+			if (const auto* script = registry.try_get<ScriptComponent>(handle))
+				e["script"] = { { "source", script->Source } };
+			return e;
 		}
+
+		// Brings an existing entity in line with validated data (components absent from the data are removed).
+		void ApplyData(Entity entity, const EntityData& data)
+		{
+			entity.GetComponent<TagComponent>().Tag = data.Name;
+			entity.GetComponent<TransformComponent>() = data.Transform;
+
+			if (data.Rigidbody) entity.AddOrReplaceComponent<RigidbodyComponent>(*data.Rigidbody);
+			else if (entity.HasComponent<RigidbodyComponent>()) entity.RemoveComponent<RigidbodyComponent>();
+
+			if (data.Collider) entity.AddOrReplaceComponent<ColliderComponent>(*data.Collider);
+			else if (entity.HasComponent<ColliderComponent>()) entity.RemoveComponent<ColliderComponent>();
+
+			if (data.Script) entity.AddOrReplaceComponent<ScriptComponent>(*data.Script);
+			else if (entity.HasComponent<ScriptComponent>()) entity.RemoveComponent<ScriptComponent>();
+		}
+
+	}
+
+	std::string SceneSerializer::Serialize(const Scene& scene)
+	{
+		Json entities = Json::array();
+
+		for (auto [handle, id] : scene.GetRegistry().view<const IDComponent>().each())
+			entities.push_back(EntityToJson(scene.GetRegistry(), handle));
 
 		Json root;
 		root["version"] = s_FormatVersion;
@@ -283,16 +309,52 @@ namespace Lumen {
 
 		for (EntityData& data : parsed)
 		{
-			Entity entity = scene.CreateEntityWithUUID(data.ID, data.Name);
-			entity.GetComponent<TransformComponent>() = data.Transform;
-			if (data.Rigidbody)
-				entity.AddComponent<RigidbodyComponent>(*data.Rigidbody);
-			if (data.Collider)
-				entity.AddComponent<ColliderComponent>(*data.Collider);
-			if (data.Script)
-				entity.AddComponent<ScriptComponent>(*data.Script);
+			ApplyData(scene.CreateEntityWithUUID(data.ID, data.Name), data);
 		}
 		return true;
+	}
+
+	std::string SceneSerializer::SerializeEntity(Scene& scene, Entity entity)
+	{
+		if (!entity.IsValid())
+			return "null";
+		return EntityToJson(scene.GetRegistry(), entity.GetHandle()).dump(2);
+	}
+
+	bool SceneSerializer::PatchEntity(Scene& scene, Entity entity, std::string_view patchJson, std::string* error)
+	{
+		auto fail = [error](const std::string& message)
+		{
+			if (error)
+				*error = message;
+			return false;
+		};
+
+		if (!entity.IsValid())
+			return fail("entity does not exist");
+
+		try
+		{
+			Json patch = Json::parse(patchJson);
+			if (!patch.is_object())
+				return fail("patch must be an object");
+
+			Json merged = EntityToJson(scene.GetRegistry(), entity.GetHandle());
+			if (auto id = patch.find("id"); id != patch.end() && *id != merged["id"])
+				return fail("entity id cannot be changed");
+
+			merged.merge_patch(patch);
+			ApplyData(entity, ParseEntity(merged));
+			return true;
+		}
+		catch (const ParseError& e)
+		{
+			return fail(e.what());
+		}
+		catch (const Json::exception& e)
+		{
+			return fail(std::string("invalid JSON: ") + e.what());
+		}
 	}
 
 }

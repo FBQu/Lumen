@@ -33,7 +33,8 @@ namespace Lumen {
 		size_t GetInstanceCount() const;
 
 		// Runs a Lua snippet in the engine's global environment. Returns false and logs on error.
-		bool Execute(std::string_view code);
+		// If the snippet returns a value, `output` receives it as text; `error` receives the failure message.
+		bool Execute(std::string_view code, std::string* output = nullptr, std::string* error = nullptr);
 	private:
 		struct Impl;
 		Scope<Impl> m_Impl;
