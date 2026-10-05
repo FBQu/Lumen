@@ -22,7 +22,11 @@ set(CPP_RTTI_ENABLED ON CACHE BOOL "" FORCE)
 set(CPP_EXCEPTIONS_ENABLED ON CACHE BOOL "" FORCE)
 set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
 
-FetchContent_MakeAvailable(glm entt lua sol2 JoltPhysics)
+FetchContent_Declare(json  GIT_REPOSITORY https://github.com/nlohmann/json.git GIT_TAG v3.12.0 GIT_SHALLOW ON)
+set(JSON_BuildTests OFF CACHE BOOL "" FORCE)
+set(JSON_Install OFF CACHE BOOL "" FORCE)
+
+FetchContent_MakeAvailable(glm entt lua sol2 JoltPhysics json)
 
 # Lua ships no CMake build; compile the interpreter core as a static C library (no lua.c / luac.c).
 # No platform defines on purpose: dlopen-based native module loading stays disabled.
