@@ -44,6 +44,11 @@ FetchContent_MakeAvailable(volk)
 # stb is header-only and unversioned; pinned to a commit. No CMake project is used.
 FetchContent_Declare(stb GIT_REPOSITORY https://github.com/nothings/stb.git GIT_TAG 2c980bb59875b0d32144a71867fbdebb2f77cd20 SOURCE_SUBDIR _none)
 FetchContent_MakeAvailable(stb)
+FetchContent_Declare(cgltf GIT_REPOSITORY https://github.com/jkuhlmann/cgltf.git GIT_TAG v1.15 GIT_SHALLOW ON SOURCE_SUBDIR _none)
+FetchContent_MakeAvailable(cgltf)
+add_library(Cgltf INTERFACE)
+target_include_directories(Cgltf SYSTEM INTERFACE ${cgltf_SOURCE_DIR})
+
 add_library(Stb INTERFACE)
 target_include_directories(Stb SYSTEM INTERFACE ${stb_SOURCE_DIR})
 

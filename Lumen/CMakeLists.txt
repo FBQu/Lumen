@@ -4,6 +4,7 @@ lumen_embed_shaders(LUMEN_SHADER_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/shaders
 
 add_library(LumenCore STATIC
     src/Lumen/Agent/AgentSession.cpp
+    src/Lumen/Assets/GltfImporter.cpp
     src/Lumen/Assets/ImageIO.cpp
     src/Lumen/Core/Log.cpp
     src/Lumen/Core/UUID.cpp
@@ -18,7 +19,7 @@ add_library(LumenCore STATIC
 )
 target_include_directories(LumenCore PUBLIC src)
 target_link_libraries(LumenCore PUBLIC glm::glm EnTT::EnTT nlohmann_json::nlohmann_json nvrhi_vk nvrhi
-    PRIVATE Sol2 Jolt volk Vulkan::Headers Stb)
+    PRIVATE Sol2 Jolt volk Vulkan::Headers Stb Cgltf)
 target_compile_definitions(LumenCore PRIVATE VK_NO_PROTOTYPES VULKAN_HPP_DISPATCH_LOADER_DYNAMIC=1)
 target_include_directories(LumenCore SYSTEM PRIVATE ${JoltPhysics_SOURCE_DIR}/..)
 target_compile_features(LumenCore PUBLIC cxx_std_20)

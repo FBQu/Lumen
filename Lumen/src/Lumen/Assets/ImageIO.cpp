@@ -35,6 +35,22 @@ namespace Lumen::ImageIO {
 		return true;
 	}
 
+	std::vector<uint8_t> EncodePNG(const ImageData& image)
+	{
+		std::vector<uint8_t> output;
+		if (image.Width == 0 || image.Height == 0 || image.BytesPerPixel < 1 || image.BytesPerPixel > 4
+			|| image.Pixels.size() != static_cast<size_t>(image.Width) * image.Height * image.BytesPerPixel)
+			return output;
+
+		stbi_write_png_to_func([](void* context, void* data, int size)
+		{
+			auto* out = static_cast<std::vector<uint8_t>*>(context);
+			out->insert(out->end(), static_cast<uint8_t*>(data), static_cast<uint8_t*>(data) + size);
+		}, &output, static_cast<int>(image.Width), static_cast<int>(image.Height), static_cast<int>(image.BytesPerPixel),
+			image.Pixels.data(), static_cast<int>(image.Width * image.BytesPerPixel));
+		return output;
+	}
+
 	std::optional<ImageData> DecodeLDR(const uint8_t* data, size_t size, std::string* error)
 	{
 		if (data == nullptr || size == 0 || size > static_cast<size_t>(std::numeric_limits<int>::max()))

@@ -106,3 +106,65 @@ TEST_CASE("MeshData::IsValid rejects broken meshes")
 	nan.Vertices[0].Position.x = std::nanf("");
 	CHECK_FALSE(nan.IsValid());
 }
+
+TEST_CASE("ComputeNormals: smooth, area-weighted and safe for degenerate triangles")
+{
+	MeshData mesh;
+	mesh.Vertices = { { { 0, 0, 0 }, {}, {} }, { { 1, 0, 0 }, {}, {} }, { { 0, 1, 0 }, {}, {} }, { { 5, 5, 5 }, {}, {} } };
+	mesh.Indices = { 0, 1, 2 };
+	mesh.ComputeNormals();
+	for (int i = 0; i < 3; i++)
+		CHECK(mesh.Vertices[i].Normal == glm::vec3(0, 0, 1));
+	CHECK(mesh.Vertices[3].Normal == glm::vec3(0, 1, 0)); // unreferenced vertex gets a safe default
+
+	MeshData degenerate;
+	degenerate.Vertices = { { { 0, 0, 0 }, {}, {} }, { { 1, 0, 0 }, {}, {} }, { { 2, 0, 0 }, {}, {} } }; // collinear
+	degenerate.Indices = { 0, 1, 2, 0, 1, 99 }; // second triangle has an out-of-range index and is ignored
+	degenerate.ComputeNormals();
+	CHECK(degenerate.IsValid() == false); // the stray index is still invalid
+	CHECK(glm::length(degenerate.Vertices[1].Normal) == doctest::Approx(1.0f));
+}
+
+TEST_CASE("ComputeTangents: tangent follows increasing U, handedness follows the UV winding")
+{
+	MeshData plane = MeshGenerator::CreatePlane();
+	for (const Vertex& v : plane.Vertices)
+	{
+		CHECK(v.Tangent.x == doctest::Approx(1.0f)); // U increases along +X
+		CHECK(v.Tangent.w == -1.0f);                 // V increases along +Z, so cross(N, T) opposes the bitangent
+	}
+
+	// Mirroring U flips both the tangent and keeps the frame orthonormal.
+	MeshData mirrored = plane;
+	for (Vertex& v : mirrored.Vertices)
+		v.UV.x = 1.0f - v.UV.x;
+	mirrored.ComputeTangents();
+	CHECK(mirrored.Vertices[0].Tangent.x == doctest::Approx(-1.0f));
+	CHECK(mirrored.Vertices[0].Tangent.w == 1.0f);
+}
+
+TEST_CASE("ComputeTangents: degenerate UVs still give a unit tangent perpendicular to the normal")
+{
+	MeshData mesh = MeshGenerator::CreateSphere(8, 6);
+	for (Vertex& v : mesh.Vertices)
+		v.UV = { 0.5f, 0.5f }; // collapsed mapping
+	mesh.ComputeTangents();
+	for (const Vertex& v : mesh.Vertices)
+	{
+		CHECK(glm::length(glm::vec3(v.Tangent)) == doctest::Approx(1.0f).epsilon(1e-4));
+		CHECK(glm::dot(glm::vec3(v.Tangent), v.Normal) == doctest::Approx(0.0f).epsilon(1e-3));
+	}
+}
+
+TEST_CASE("Generated primitives have orthonormal tangent frames")
+{
+	for (const MeshData& mesh : { MeshGenerator::CreateCube(), MeshGenerator::CreateSphere(16, 8), MeshGenerator::CreatePlane() })
+	{
+		for (const Vertex& v : mesh.Vertices)
+		{
+			CHECK(glm::length(glm::vec3(v.Tangent)) == doctest::Approx(1.0f).epsilon(1e-3));
+			CHECK(std::abs(glm::dot(glm::vec3(v.Tangent), v.Normal)) < 1e-3f);
+			CHECK(std::abs(v.Tangent.w) == 1.0f);
+		}
+	}
+}

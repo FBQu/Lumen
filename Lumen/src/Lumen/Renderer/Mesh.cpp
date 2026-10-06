@@ -22,6 +22,68 @@ namespace Lumen {
 
 	}
 
+	void MeshData::ComputeNormals()
+	{
+		std::vector<glm::vec3> sums(Vertices.size(), glm::vec3(0.0f));
+		for (size_t i = 0; i + 2 < Indices.size(); i += 3)
+		{
+			const uint32_t a = Indices[i], b = Indices[i + 1], c = Indices[i + 2];
+			if (a >= Vertices.size() || b >= Vertices.size() || c >= Vertices.size())
+				continue;
+			// The cross product's length is twice the triangle area, which gives area weighting for free.
+			const glm::vec3 n = glm::cross(Vertices[b].Position - Vertices[a].Position, Vertices[c].Position - Vertices[a].Position);
+			sums[a] += n;
+			sums[b] += n;
+			sums[c] += n;
+		}
+		for (size_t i = 0; i < Vertices.size(); i++)
+			Vertices[i].Normal = glm::length(sums[i]) > 1e-12f ? glm::normalize(sums[i]) : glm::vec3(0.0f, 1.0f, 0.0f);
+	}
+
+	void MeshData::ComputeTangents()
+	{
+		std::vector<glm::vec3> tangents(Vertices.size(), glm::vec3(0.0f));
+		std::vector<glm::vec3> bitangents(Vertices.size(), glm::vec3(0.0f));
+
+		for (size_t i = 0; i + 2 < Indices.size(); i += 3)
+		{
+			const uint32_t ia = Indices[i], ib = Indices[i + 1], ic = Indices[i + 2];
+			if (ia >= Vertices.size() || ib >= Vertices.size() || ic >= Vertices.size())
+				continue;
+			const Vertex& a = Vertices[ia];
+			const Vertex& b = Vertices[ib];
+			const Vertex& c = Vertices[ic];
+
+			const glm::vec3 e1 = b.Position - a.Position, e2 = c.Position - a.Position;
+			const glm::vec2 d1 = b.UV - a.UV, d2 = c.UV - a.UV;
+			const float det = d1.x * d2.y - d2.x * d1.y;
+			if (std::abs(det) < 1e-12f)
+				continue; // degenerate UV mapping
+			const float inv = 1.0f / det;
+			const glm::vec3 t = (e1 * d2.y - e2 * d1.y) * inv;
+			const glm::vec3 bt = (e2 * d1.x - e1 * d2.x) * inv;
+			for (uint32_t index : { ia, ib, ic })
+			{
+				tangents[index] += t;
+				bitangents[index] += bt;
+			}
+		}
+
+		for (size_t i = 0; i < Vertices.size(); i++)
+		{
+			const glm::vec3 n = Vertices[i].Normal;
+			glm::vec3 t = tangents[i] - n * glm::dot(n, tangents[i]); // Gram-Schmidt
+			if (glm::length(t) < 1e-8f)
+			{
+				// No UV information: pick any direction perpendicular to the normal.
+				t = std::abs(n.y) < 0.99f ? glm::cross(glm::vec3(0.0f, 1.0f, 0.0f), n) : glm::cross(glm::vec3(1.0f, 0.0f, 0.0f), n);
+			}
+			t = glm::normalize(t);
+			const float handedness = glm::dot(glm::cross(n, t), bitangents[i]) < 0.0f ? -1.0f : 1.0f;
+			Vertices[i].Tangent = glm::vec4(t, handedness);
+		}
+	}
+
 	bool MeshData::IsValid() const
 	{
 		if (Indices.size() % 3 != 0)
@@ -31,7 +93,7 @@ namespace Lumen {
 				return false;
 		for (const Vertex& v : Vertices)
 		{
-			if (!IsFinite(v.Position) || !IsFinite(v.Normal) || !IsFinite(v.UV))
+			if (!IsFinite(v.Position) || !IsFinite(v.Normal) || !IsFinite(v.UV) || !IsFinite(v.Tangent))
 				return false;
 		}
 		return true;
@@ -61,6 +123,7 @@ namespace Lumen {
 				for (uint32_t i : { 0u, 1u, 2u, 0u, 2u, 3u })
 					mesh.Indices.push_back(base + i);
 			}
+			mesh.ComputeTangents();
 			return mesh;
 		}
 
@@ -99,6 +162,7 @@ namespace Lumen {
 							mesh.Indices.push_back(i);
 				}
 			}
+			mesh.ComputeTangents();
 			return mesh;
 		}
 
@@ -109,6 +173,7 @@ namespace Lumen {
 			mesh.Vertices = { { { -0.5f, 0, 0.5f }, up, { 0, 1 } }, { { 0.5f, 0, 0.5f }, up, { 1, 1 } },
 			                  { { 0.5f, 0, -0.5f }, up, { 1, 0 } }, { { -0.5f, 0, -0.5f }, up, { 0, 0 } } };
 			mesh.Indices = { 0, 1, 2, 0, 2, 3 };
+			mesh.ComputeTangents();
 			return mesh;
 		}
 
