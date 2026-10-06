@@ -139,3 +139,62 @@ TEST_CASE("Deserialize works without an error out-parameter")
 	CHECK_FALSE(SceneSerializer::Deserialize(scene, "{"));
 	CHECK(SceneSerializer::Deserialize(scene, Wrap(R"({"id":"3"})")));
 }
+
+TEST_CASE("Render components round-trip through JSON")
+{
+	Scene original;
+	Entity mesh = original.CreateEntityWithUUID(UUID(100), "Mesh");
+	auto& mr = mesh.AddComponent<MeshRendererComponent>();
+	mr.Primitive = PrimitiveType::Sphere;
+	mr.Material.BaseColor = { 0.1f, 0.2f, 0.3f, 0.4f };
+	mr.Material.Metallic = 0.7f;
+	mr.Material.Roughness = 0.2f;
+	mr.Material.Emissive = { 1.0f, 2.0f, 3.0f };
+	mr.MeshAsset = UUID(18446744073709551615ull);
+	mr.MaterialAsset = UUID(42);
+
+	Entity camera = original.CreateEntityWithUUID(UUID(101), "Cam");
+	camera.AddComponent<CameraComponent>().FovY = glm::radians(75.0f);
+	camera.GetComponent<CameraComponent>().Near = 0.5f;
+	camera.GetComponent<CameraComponent>().Far = 250.0f;
+
+	Entity sun = original.CreateEntityWithUUID(UUID(102), "Sun");
+	sun.AddComponent<DirectionalLightComponent>().Color = { 1.0f, 0.5f, 0.25f };
+	sun.GetComponent<DirectionalLightComponent>().Intensity = 7.5f;
+
+	Scene loaded;
+	std::string error;
+	REQUIRE_MESSAGE(SceneSerializer::Deserialize(loaded, SceneSerializer::Serialize(original), &error), error);
+
+	const auto& m = loaded.FindEntityByUUID(UUID(100)).GetComponent<MeshRendererComponent>();
+	CHECK(m.Primitive == PrimitiveType::Sphere);
+	CHECK(m.Material.BaseColor == glm::vec4(0.1f, 0.2f, 0.3f, 0.4f));
+	CHECK(m.Material.Metallic == doctest::Approx(0.7f));
+	CHECK(m.Material.Emissive == glm::vec3(1.0f, 2.0f, 3.0f));
+	CHECK(static_cast<uint64_t>(m.MeshAsset) == 18446744073709551615ull);
+	CHECK(static_cast<uint64_t>(m.MaterialAsset) == 42);
+
+	const auto& c = loaded.FindEntityByUUID(UUID(101)).GetComponent<CameraComponent>();
+	CHECK(glm::degrees(c.FovY) == doctest::Approx(75.0f).epsilon(1e-4));
+	CHECK(c.Near == doctest::Approx(0.5f));
+	CHECK(c.Far == doctest::Approx(250.0f));
+
+	const auto& l = loaded.FindEntityByUUID(UUID(102)).GetComponent<DirectionalLightComponent>();
+	CHECK(l.Color == glm::vec3(1.0f, 0.5f, 0.25f));
+	CHECK(l.Intensity == doctest::Approx(7.5f));
+}
+
+TEST_CASE("Render component JSON is validated")
+{
+	CHECK(Fails(Wrap(R"({"id":"1","meshRenderer":{"primitive":"cone"}})"), "unknown primitive"));
+	CHECK(Fails(Wrap(R"({"id":"1","meshRenderer":{"meshAsset":5}})"), "'meshAsset' must be a decimal string"));
+	CHECK(Fails(Wrap(R"({"id":"1","meshRenderer":{"meshAsset":"x"}})"), "'meshAsset' must be an unsigned"));
+	CHECK(Fails(Wrap(R"({"id":"1","meshRenderer":{"material":{"baseColor":[1,1,1]}}})"), "4 numbers"));
+	CHECK(Fails(Wrap(R"({"id":"1","meshRenderer":{"material":5}})"), "'material' must be an object"));
+	CHECK(Fails(Wrap(R"({"id":"1","camera":{"fovDegrees":0}})"), "between 1 and 179"));
+	CHECK(Fails(Wrap(R"({"id":"1","camera":{"fovDegrees":200}})"), "between 1 and 179"));
+	CHECK(Fails(Wrap(R"({"id":"1","camera":{"near":0}})"), "0 < near < far"));
+	CHECK(Fails(Wrap(R"({"id":"1","camera":{"near":5,"far":1}})"), "0 < near < far"));
+	CHECK(Fails(Wrap(R"({"id":"1","directionalLight":{"intensity":-1}})"), "must not be negative"));
+	CHECK(Fails(Wrap(R"({"id":"1","directionalLight":[]})"), "'directionalLight' must be an object"));
+}

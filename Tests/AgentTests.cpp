@@ -239,3 +239,87 @@ TEST_CASE("Destroying a session while playing is safe")
 	AgentSession again; // can create a fresh session afterwards
 	CHECK(Ok(again, "ping") == "pong");
 }
+
+// ---------------------------------------------------------------------------------------------
+// Assets
+// ---------------------------------------------------------------------------------------------
+
+#include "GltfTestData.h"
+
+#include <filesystem>
+#include <fstream>
+
+TEST_CASE("Agent: import a glTF, instantiate it, and the references survive play and scene round trips")
+{
+	namespace fs = std::filesystem;
+	const fs::path dir = fs::temp_directory_path() / "lumen_agent_assets";
+	fs::create_directories(dir);
+	const std::string path = (dir / "tri.gltf").string();
+	std::ofstream(path) << GltfTestData::TriangleGltf();
+
+	AgentSession session;
+	Json imported = Ok(session, "asset.import_gltf", { { "path", path } });
+	CHECK(imported["name"] == "tri.gltf");
+	CHECK(imported["primitives"] == 1);
+	CHECK(imported["warnings"].empty());
+	const std::string model = imported["model"];
+
+	CHECK(Ok(session, "asset.list")["meshes"] == 1);
+	CHECK(Ok(session, "asset.import_gltf", { { "path", path } })["model"] == model); // idempotent
+	CHECK(Ok(session, "asset.list")["meshes"] == 1);
+
+	Json instances = Ok(session, "asset.instantiate", { { "model", model }, { "transform", { { "translation", { 5, 0, 0 } }, { "scale", { 2, 2, 2 } } } } });
+	REQUIRE(instances["entities"].size() == 1);
+	const std::string id = instances["entities"][0]["id"];
+
+	Json entity = Ok(session, "entity.get", { { "id", id } });
+	CHECK(entity["name"] == "Root");
+	CHECK(entity["transform"]["translation"][0] == doctest::Approx(7.0)); // root T(5) * S(2) applied to the node's local x of 1
+	CHECK(entity["transform"]["scale"][0] == doctest::Approx(2.0));
+	CHECK(entity["meshRenderer"]["meshAsset"] != "0");
+	CHECK(entity["meshRenderer"]["materialAsset"] != "0");
+
+	// Scene JSON carries the asset references; reloading keeps them.
+	Json scene = Ok(session, "scene.get");
+	Ok(session, "scene.clear");
+	Ok(session, "scene.load", { { "scene", scene } });
+	CHECK(Ok(session, "entity.get", { { "id", id } })["meshRenderer"]["meshAsset"] == entity["meshRenderer"]["meshAsset"]);
+
+	Ok(session, "play.start");
+	Ok(session, "play.step", { { "frames", 2 } });
+	Ok(session, "play.stop");
+	CHECK(Ok(session, "entity.get", { { "id", id } })["meshRenderer"]["meshAsset"] == entity["meshRenderer"]["meshAsset"]);
+
+	fs::remove_all(dir);
+}
+
+TEST_CASE("Agent: asset commands validate their input")
+{
+	AgentSession session;
+	CHECK(Contains(ErrorOf(session, "asset.import_gltf"), "missing argument 'path'"));
+	CHECK(Contains(ErrorOf(session, "asset.import_gltf", { { "path", 5 } }), "'path' must be a string"));
+	CHECK(Contains(ErrorOf(session, "asset.import_gltf", { { "path", "/no/such/file.gltf" } }), "could not read"));
+	CHECK(Contains(ErrorOf(session, "asset.instantiate"), "missing argument 'model'"));
+	CHECK(Contains(ErrorOf(session, "asset.instantiate", { { "model", "123" } }), "model not found"));
+	CHECK(Contains(ErrorOf(session, "asset.instantiate", { { "model", 5 } }), "'model' must be a decimal string"));
+	CHECK(Ok(session, "asset.list")["meshes"] == 0);
+}
+
+TEST_CASE("Agent: render components can be created and patched through JSON")
+{
+	AgentSession session;
+	const std::string id = Ok(session, "entity.create", { { "name", "Lamp" },
+		{ "meshRenderer", { { "primitive", "sphere" }, { "material", { { "roughness", 0.1 }, { "emissive", { 1, 0, 0 } } } } } } })["id"];
+	CHECK(Ok(session, "entity.get", { { "id", id } })["meshRenderer"]["material"]["roughness"] == doctest::Approx(0.1));
+
+	Json patched = Ok(session, "entity.set", { { "id", id }, { "meshRenderer", { { "material", { { "metallic", 1.0 } } } } },
+	                                           { "camera", { { "fovDegrees", 50 } } }, { "directionalLight", { { "intensity", 2 } } } });
+	CHECK(patched["meshRenderer"]["primitive"] == "sphere"); // merge patch keeps untouched fields
+	CHECK(patched["meshRenderer"]["material"]["metallic"] == doctest::Approx(1.0));
+	CHECK(patched["meshRenderer"]["material"]["roughness"] == doctest::Approx(0.1));
+	CHECK(patched["camera"]["fovDegrees"] == doctest::Approx(50.0));
+	CHECK(patched["directionalLight"]["intensity"] == doctest::Approx(2.0));
+
+	CHECK_FALSE(Ok(session, "entity.set", { { "id", id }, { "camera", nullptr } }).contains("camera"));
+	CHECK(Contains(ErrorOf(session, "entity.set", { { "id", id }, { "camera", { { "fovDegrees", 500 } } } }), "between 1 and 179"));
+}

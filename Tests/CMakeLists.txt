@@ -7,6 +7,7 @@ add_executable(LumenTests
     SerializerTests.cpp
     AgentTests.cpp
     GltfImporterTests.cpp
+    AssetManagerTests.cpp
     ImageIOTests.cpp
     MeshTests.cpp
     RendererTests.cpp

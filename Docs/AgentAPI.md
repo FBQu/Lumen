@@ -19,8 +19,15 @@ failed commands leave the scene unchanged. Entity ids are decimal strings (64-bi
   "rigidbody": { "type": "dynamic|kinematic|static", "mass": 1, "friction": 0.5, "restitution": 0,
                  "gravityScale": 1, "linearDamping": 0.05, "angularDamping": 0.05, "fixedRotation": false },
   "collider":  { "shape": "box|sphere|capsule", "halfExtents": [0.5,0.5,0.5], "radius": 0.5, "halfHeight": 0.5, "offset": [0,0,0] },
-  "script":    { "source": "return { OnUpdate = function(self, dt) end }" } }
+  "script":    { "source": "return { OnUpdate = function(self, dt) end }" },
+  "meshRenderer": { "primitive": "cube|sphere|plane",
+                    "material": { "baseColor": [1,1,1,1], "metallic": 0, "roughness": 0.5, "emissive": [0,0,0] },
+                    "meshAsset": "0", "materialAsset": "0" },
+  "camera": { "fovDegrees": 60, "near": 0.1, "far": 1000 },
+  "directionalLight": { "color": [1,1,1], "intensity": 3 } }
 ```
+`meshAsset` / `materialAsset` are asset ids (decimal strings, "0" = none); when set they override `primitive` / `material`.
+Cameras and lights look down the entity's local -Z axis, so rotate the entity to aim them.
 Rotation is Euler radians. A collider without a rigidbody is static. All fields are optional on create.
 
 ## Commands
@@ -37,6 +44,9 @@ Rotation is Euler radians. A collider without a rigidbody is static. All fields 
 | `entity.destroy` | `id` | `{entityCount}` |
 | `entity.find` | `name` | `{id}` |
 | `entity.list` | | `[{id, name}]` |
+| `asset.import_gltf` | `path` (.gltf/.glb) | `{model, name, nodes, primitives, warnings}`; idempotent; ids derive from the path, so use project-relative paths |
+| `asset.list` | | `{meshes, materials, textures}` |
+| `asset.instantiate` | `model`, optional `transform {translation, rotation, scale}` | `{entities: [{id, name}]}`, one entity per mesh primitive |
 | `play.start` | | `{playing}`; snapshots the edit scene, starts physics and scripts |
 | `play.step` | `frames` (1..100000, default 1), `dt` (default 1/60) | `{frame, entityCount}` |
 | `play.state` | | `{playing, frame, entityCount}` |

@@ -112,6 +112,60 @@ namespace Lumen {
 			return it->get<std::string>();
 		}
 
+		glm::vec4 Vec4OrDefault(const Json& json, const char* key, const glm::vec4& fallback)
+		{
+			auto it = json.find(key);
+			if (it == json.end())
+				return fallback;
+			if (!it->is_array() || it->size() != 4)
+				throw ParseError(std::string("'") + key + "' must be an array of 4 numbers");
+			glm::vec4 v;
+			for (int i = 0; i < 4; i++)
+			{
+				if (!(*it)[i].is_number())
+					throw ParseError(std::string("'") + key + "' must be an array of 4 numbers");
+				v[i] = (*it)[i].get<float>();
+			}
+			return v;
+		}
+
+		// Asset ids are decimal strings; "0" or a missing key means "none".
+		UUID AssetIDOr(const Json& json, const char* key)
+		{
+			auto it = json.find(key);
+			if (it == json.end())
+				return UUID(0);
+			if (!it->is_string())
+				throw ParseError(std::string("'") + key + "' must be a decimal string");
+			const std::string& text = it->get_ref<const std::string&>();
+			uint64_t value = 0;
+			auto [end, ec] = std::from_chars(text.data(), text.data() + text.size(), value);
+			if (text.empty() || ec != std::errc() || end != text.data() + text.size())
+				throw ParseError(std::string("'") + key + "' must be an unsigned 64-bit decimal string");
+			return UUID(value);
+		}
+
+		const char* ToString(PrimitiveType type)
+		{
+			switch (type)
+			{
+				case PrimitiveType::Cube:   return "cube";
+				case PrimitiveType::Sphere: return "sphere";
+				case PrimitiveType::Plane:  return "plane";
+			}
+			return "cube";
+		}
+
+		PrimitiveType PrimitiveFromString(const std::string& name)
+		{
+			if (name == "cube")   return PrimitiveType::Cube;
+			if (name == "sphere") return PrimitiveType::Sphere;
+			if (name == "plane")  return PrimitiveType::Plane;
+			throw ParseError("unknown primitive '" + name + "'");
+		}
+
+		Json Vec4ToJson(const glm::vec4& v) { return Json::array({ v.x, v.y, v.z, v.w }); }
+
 		// Everything about one entity, validated and ready to be applied.
 		struct EntityData
 		{
@@ -121,6 +175,9 @@ namespace Lumen {
 			std::optional<RigidbodyComponent> Rigidbody;
 			std::optional<ColliderComponent> Collider;
 			std::optional<ScriptComponent> Script;
+			std::optional<MeshRendererComponent> MeshRenderer;
+			std::optional<CameraComponent> Camera;
+			std::optional<DirectionalLightComponent> DirectionalLight;
 		};
 
 		UUID ParseID(const Json& json)
@@ -193,6 +250,54 @@ namespace Lumen {
 				data.Script = ScriptComponent{ StringOr(*it, "source", "") };
 			}
 
+			if (auto it = json.find("meshRenderer"); it != json.end())
+			{
+				if (!it->is_object())
+					throw ParseError("'meshRenderer' must be an object");
+				MeshRendererComponent mr;
+				mr.Primitive = PrimitiveFromString(StringOr(*it, "primitive", "cube"));
+				if (auto m = it->find("material"); m != it->end())
+				{
+					if (!m->is_object())
+						throw ParseError("'material' must be an object");
+					mr.Material.BaseColor = Vec4OrDefault(*m, "baseColor", mr.Material.BaseColor);
+					mr.Material.Metallic = NumberOr(*m, "metallic", mr.Material.Metallic);
+					mr.Material.Roughness = NumberOr(*m, "roughness", mr.Material.Roughness);
+					mr.Material.Emissive = VecOr(*m, "emissive", mr.Material.Emissive);
+				}
+				mr.MeshAsset = AssetIDOr(*it, "meshAsset");
+				mr.MaterialAsset = AssetIDOr(*it, "materialAsset");
+				data.MeshRenderer = mr;
+			}
+
+			if (auto it = json.find("camera"); it != json.end())
+			{
+				if (!it->is_object())
+					throw ParseError("'camera' must be an object");
+				CameraComponent camera;
+				const float fovDegrees = NumberOr(*it, "fovDegrees", glm::degrees(camera.FovY));
+				camera.Near = NumberOr(*it, "near", camera.Near);
+				camera.Far = NumberOr(*it, "far", camera.Far);
+				if (!(fovDegrees > 1.0f && fovDegrees < 179.0f))
+					throw ParseError("camera 'fovDegrees' must be between 1 and 179");
+				if (!(camera.Near > 0.0f) || !(camera.Far > camera.Near))
+					throw ParseError("camera needs 0 < near < far");
+				camera.FovY = glm::radians(fovDegrees);
+				data.Camera = camera;
+			}
+
+			if (auto it = json.find("directionalLight"); it != json.end())
+			{
+				if (!it->is_object())
+					throw ParseError("'directionalLight' must be an object");
+				DirectionalLightComponent light;
+				light.Color = VecOr(*it, "color", light.Color);
+				light.Intensity = NumberOr(*it, "intensity", light.Intensity);
+				if (light.Intensity < 0.0f)
+					throw ParseError("light 'intensity' must not be negative");
+				data.DirectionalLight = light;
+			}
+
 			return data;
 		}
 
@@ -227,6 +332,18 @@ namespace Lumen {
 			}
 			if (const auto* script = registry.try_get<ScriptComponent>(handle))
 				e["script"] = { { "source", script->Source } };
+			if (const auto* mr = registry.try_get<MeshRendererComponent>(handle))
+			{
+				Json material = { { "baseColor", Vec4ToJson(mr->Material.BaseColor) }, { "metallic", mr->Material.Metallic },
+				                  { "roughness", mr->Material.Roughness }, { "emissive", VecToJson(mr->Material.Emissive) } };
+				e["meshRenderer"] = { { "primitive", ToString(mr->Primitive) }, { "material", material },
+				                      { "meshAsset", std::to_string(static_cast<uint64_t>(mr->MeshAsset)) },
+				                      { "materialAsset", std::to_string(static_cast<uint64_t>(mr->MaterialAsset)) } };
+			}
+			if (const auto* camera = registry.try_get<CameraComponent>(handle))
+				e["camera"] = { { "fovDegrees", glm::degrees(camera->FovY) }, { "near", camera->Near }, { "far", camera->Far } };
+			if (const auto* light = registry.try_get<DirectionalLightComponent>(handle))
+				e["directionalLight"] = { { "color", VecToJson(light->Color) }, { "intensity", light->Intensity } };
 			return e;
 		}
 
@@ -244,6 +361,15 @@ namespace Lumen {
 
 			if (data.Script) entity.AddOrReplaceComponent<ScriptComponent>(*data.Script);
 			else if (entity.HasComponent<ScriptComponent>()) entity.RemoveComponent<ScriptComponent>();
+
+			if (data.MeshRenderer) entity.AddOrReplaceComponent<MeshRendererComponent>(*data.MeshRenderer);
+			else if (entity.HasComponent<MeshRendererComponent>()) entity.RemoveComponent<MeshRendererComponent>();
+
+			if (data.Camera) entity.AddOrReplaceComponent<CameraComponent>(*data.Camera);
+			else if (entity.HasComponent<CameraComponent>()) entity.RemoveComponent<CameraComponent>();
+
+			if (data.DirectionalLight) entity.AddOrReplaceComponent<DirectionalLightComponent>(*data.DirectionalLight);
+			else if (entity.HasComponent<DirectionalLightComponent>()) entity.RemoveComponent<DirectionalLightComponent>();
 		}
 
 	}

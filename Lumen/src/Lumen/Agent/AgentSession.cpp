@@ -1,11 +1,15 @@
 #include "Lumen/Agent/AgentSession.h"
 
+#include "Lumen/Assets/AssetManager.h"
 #include "Lumen/Core/Log.h"
 #include "Lumen/Physics/PhysicsWorld.h"
 #include "Lumen/Scene/Entity.h"
 #include "Lumen/Scene/Scene.h"
 #include "Lumen/Scene/SceneSerializer.h"
 #include "Lumen/Scripting/ScriptEngine.h"
+
+#include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/quaternion.hpp>
 
 #include <nlohmann/json.hpp>
 
@@ -14,6 +18,7 @@
 #include <functional>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <stdexcept>
 
 namespace Lumen {
@@ -43,15 +48,15 @@ namespace Lumen {
 			return "info";
 		}
 
-		UUID ParseUUID(const Json& value)
+		UUID ParseUUID(const Json& value, const char* what = "id")
 		{
 			if (!value.is_string())
-				throw CommandError("'id' must be a decimal string");
+				throw CommandError(std::string("'") + what + "' must be a decimal string");
 			const std::string& text = value.get_ref<const std::string&>();
 			uint64_t number = 0;
 			auto [end, ec] = std::from_chars(text.data(), text.data() + text.size(), number);
 			if (text.empty() || ec != std::errc() || end != text.data() + text.size() || number == 0)
-				throw CommandError("'id' must be a non-zero unsigned 64-bit decimal string");
+				throw CommandError(std::string("'") + what + "' must be a non-zero unsigned 64-bit decimal string");
 			return UUID(number);
 		}
 
@@ -79,6 +84,7 @@ namespace Lumen {
 		static inline Impl* s_Active = nullptr;
 
 		Scene SceneData;
+		AssetManager Assets;
 		PhysicsWorld Physics;
 		ScriptEngine Scripts;
 
@@ -231,6 +237,54 @@ namespace Lumen {
 			{
 				SceneData.DestroyEntity(RequireEntity(args));
 				return Json{ { "entityCount", SceneData.GetEntityCount() } };
+			};
+
+			Commands["asset.import_gltf"] = [this](const Json& args)
+			{
+				const Json& path = Require(args, "path");
+				if (!path.is_string())
+					throw CommandError("'path' must be a string");
+
+				std::string error;
+				std::optional<UUID> model = Assets.ImportGltf(path.get<std::string>(), &error);
+				if (!model)
+					throw CommandError(error);
+
+				const ModelAsset* asset = Assets.GetModel(*model);
+				size_t primitives = 0;
+				for (const ModelNode& node : asset->Nodes)
+					primitives += node.Primitives.size();
+				return Json{ { "model", IDString(*model) }, { "name", asset->Name }, { "nodes", asset->Nodes.size() },
+				             { "primitives", primitives }, { "warnings", asset->Warnings } };
+			};
+
+			Commands["asset.list"] = [this](const Json&)
+			{
+				return Json{ { "meshes", Assets.GetMeshCount() }, { "materials", Assets.GetMaterialCount() }, { "textures", Assets.GetTextureCount() } };
+			};
+
+			Commands["asset.instantiate"] = [this](const Json& args)
+			{
+				const UUID model = ParseUUID(Require(args, "model"), "model");
+				if (Assets.GetModel(model) == nullptr)
+					throw CommandError("model not found; import it with asset.import_gltf first");
+
+				glm::mat4 transform(1.0f);
+				if (auto it = args.find("transform"); it != args.end())
+				{
+					if (!it->is_object())
+						throw CommandError("'transform' must be an object");
+					glm::vec3 translation(0.0f), rotation(0.0f), scale(1.0f);
+					if (it->contains("translation")) translation = ParseVec3((*it)["translation"], "translation");
+					if (it->contains("rotation")) rotation = ParseVec3((*it)["rotation"], "rotation");
+					if (it->contains("scale")) scale = ParseVec3((*it)["scale"], "scale");
+					transform = glm::translate(glm::mat4(1.0f), translation) * glm::mat4_cast(glm::quat(rotation)) * glm::scale(glm::mat4(1.0f), scale);
+				}
+
+				Json created = Json::array();
+				for (Entity entity : Assets.Instantiate(SceneData, model, transform))
+					created.push_back({ { "id", IDString(entity.GetUUID()) }, { "name", entity.GetName() } });
+				return Json{ { "entities", created } };
 			};
 
 			Commands["play.start"] = [this](const Json&)

@@ -83,10 +83,14 @@ namespace Lumen {
 	};
 
 	// Draws a built-in primitive with a material. Cube and Sphere have size 1 (radius 0.5); Plane is 1x1 on XZ facing +Y.
+	// If MeshAsset is non-zero the imported mesh is drawn instead of the primitive; if MaterialAsset is non-zero it
+	// replaces the inline Material. Asset ids come from the AssetManager (see Assets/AssetManager.h).
 	struct MeshRendererComponent
 	{
 		PrimitiveType Primitive = PrimitiveType::Cube;
 		MaterialData Material;
+		UUID MeshAsset = UUID(0);
+		UUID MaterialAsset = UUID(0);
 	};
 
 	// Perspective camera looking down the entity's local -Z axis.

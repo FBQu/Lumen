@@ -4,6 +4,7 @@ lumen_embed_shaders(LUMEN_SHADER_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/shaders
 
 add_library(LumenCore STATIC
     src/Lumen/Agent/AgentSession.cpp
+    src/Lumen/Assets/AssetManager.cpp
     src/Lumen/Assets/GltfImporter.cpp
     src/Lumen/Assets/ImageIO.cpp
     src/Lumen/Core/Log.cpp
