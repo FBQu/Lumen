@@ -10,6 +10,7 @@ add_executable(LumenTests
     AssetManagerTests.cpp
     ImageIOTests.cpp
     MeshTests.cpp
+    MipChainTests.cpp
     RendererTests.cpp
     RenderDeviceTests.cpp
 )

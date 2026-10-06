@@ -11,6 +11,7 @@ add_library(LumenCore STATIC
     src/Lumen/Core/UUID.cpp
     src/Lumen/Physics/PhysicsWorld.cpp
     src/Lumen/Renderer/Mesh.cpp
+    src/Lumen/Renderer/MipChain.cpp
     src/Lumen/Renderer/RenderDevice.cpp
     src/Lumen/Renderer/Renderer.cpp
     src/Lumen/Scene/Scene.cpp

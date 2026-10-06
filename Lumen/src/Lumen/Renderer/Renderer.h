@@ -9,8 +9,11 @@
 namespace Lumen {
 
 	class Scene;
+	class AssetManager;
 
 	// Forward PBR renderer: scene -> HDR (RGBA16F) -> ACES tonemap -> LDR (RGBA8, sRGB-encoded).
+	// Materials follow glTF's metallic-roughness model (base color, metallic-roughness, normal, occlusion, emissive
+	// textures; opaque, alpha-mask and alpha-blend modes; single- and double-sided).
 	class Renderer
 	{
 	public:
@@ -32,8 +35,10 @@ namespace Lumen {
 		uint32_t GetHeight() const;
 
 		// Renders the scene from `camera` (an entity with CameraComponent and TransformComponent) into the output
-		// texture and waits for completion. Returns false, drawing nothing, if the camera is invalid.
-		bool Render(Scene& scene, Entity camera);
+		// texture and waits for completion. `assets` supplies imported meshes/materials/textures referenced by
+		// MeshRendererComponents (entities referencing a missing asset are skipped with a warning). Assets must not be
+		// modified after their first use by the renderer. Returns false, drawing nothing, if the camera is invalid.
+		bool Render(Scene& scene, Entity camera, const AssetManager* assets = nullptr);
 
 		nvrhi::ITexture* GetOutput() const;
 		nvrhi::ITexture* GetHdrTarget() const;
