@@ -26,7 +26,20 @@ FetchContent_Declare(json  GIT_REPOSITORY https://github.com/nlohmann/json.git G
 set(JSON_BuildTests OFF CACHE BOOL "" FORCE)
 set(JSON_Install OFF CACHE BOOL "" FORCE)
 
-FetchContent_MakeAvailable(glm entt lua sol2 JoltPhysics json)
+FetchContent_Declare(nvrhi GIT_REPOSITORY https://github.com/NVIDIA-RTX/NVRHI.git GIT_TAG 6b96fb03e07539f08327aea76c56d55f1de9d906)
+FetchContent_Declare(volk  GIT_REPOSITORY https://github.com/zeux/volk.git GIT_TAG vulkan-sdk-1.4.363.0 GIT_SHALLOW ON)
+
+set(NVRHI_VULKAN_HEADERS_GIT_TAG vulkan-sdk-1.4.363.0 CACHE STRING "" FORCE)
+set(NVRHI_INSTALL OFF CACHE BOOL "" FORCE)
+set(NVRHI_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(NVRHI_WITH_VULKAN ON CACHE BOOL "" FORCE)
+set(NVRHI_WITH_VALIDATION ON CACHE BOOL "" FORCE)
+
+FetchContent_MakeAvailable(glm entt lua sol2 JoltPhysics json nvrhi)
+
+# volk loads the Vulkan loader at runtime so Lumen needs no link-time dependency on the Vulkan SDK.
+# Vulkan headers come from the Vulkan-Headers target that nvrhi fetches.
+FetchContent_MakeAvailable(volk)
 
 # Lua ships no CMake build; compile the interpreter core as a static C library (no lua.c / luac.c).
 # No platform defines on purpose: dlopen-based native module loading stays disabled.

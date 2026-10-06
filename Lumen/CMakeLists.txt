@@ -3,13 +3,15 @@ add_library(LumenCore STATIC
     src/Lumen/Core/Log.cpp
     src/Lumen/Core/UUID.cpp
     src/Lumen/Physics/PhysicsWorld.cpp
+    src/Lumen/Renderer/RenderDevice.cpp
     src/Lumen/Scene/Scene.cpp
     src/Lumen/Scene/SceneSerializer.cpp
     src/Lumen/Scripting/ScriptEngine.cpp
 )
 target_include_directories(LumenCore PUBLIC src)
-target_link_libraries(LumenCore PUBLIC glm::glm EnTT::EnTT nlohmann_json::nlohmann_json
-    PRIVATE Sol2 Jolt)
+target_link_libraries(LumenCore PUBLIC glm::glm EnTT::EnTT nlohmann_json::nlohmann_json nvrhi_vk nvrhi
+    PRIVATE Sol2 Jolt volk Vulkan::Headers)
+target_compile_definitions(LumenCore PRIVATE VK_NO_PROTOTYPES VULKAN_HPP_DISPATCH_LOADER_DYNAMIC=1)
 target_include_directories(LumenCore SYSTEM PRIVATE ${JoltPhysics_SOURCE_DIR}/..)
 target_compile_features(LumenCore PUBLIC cxx_std_20)
 target_compile_definitions(LumenCore PUBLIC GLM_ENABLE_EXPERIMENTAL GLM_FORCE_DEPTH_ZERO_TO_ONE)
