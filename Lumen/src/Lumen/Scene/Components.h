@@ -71,4 +71,37 @@ namespace Lumen {
 		glm::vec3 Offset = { 0.0f, 0.0f, 0.0f };      // Shape offset from the entity origin
 	};
 
+	enum class PrimitiveType { Cube, Sphere, Plane };
+
+	// Surface parameters of the metallic-roughness PBR model. Colors are linear.
+	struct MaterialData
+	{
+		glm::vec4 BaseColor = { 1.0f, 1.0f, 1.0f, 1.0f };
+		float Metallic = 0.0f;
+		float Roughness = 0.5f;
+		glm::vec3 Emissive = { 0.0f, 0.0f, 0.0f };
+	};
+
+	// Draws a built-in primitive with a material. Cube and Sphere have size 1 (radius 0.5); Plane is 1x1 on XZ facing +Y.
+	struct MeshRendererComponent
+	{
+		PrimitiveType Primitive = PrimitiveType::Cube;
+		MaterialData Material;
+	};
+
+	// Perspective camera looking down the entity's local -Z axis.
+	struct CameraComponent
+	{
+		float FovY = glm::radians(60.0f);
+		float Near = 0.1f;
+		float Far = 1000.0f;
+	};
+
+	// Directional light shining along the entity's local -Z axis. Intensity scales the linear color.
+	struct DirectionalLightComponent
+	{
+		glm::vec3 Color = { 1.0f, 1.0f, 1.0f };
+		float Intensity = 3.0f;
+	};
+
 }

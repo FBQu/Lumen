@@ -1,12 +1,19 @@
+include(${PROJECT_SOURCE_DIR}/cmake/Shaders.cmake)
+lumen_embed_shaders(LUMEN_SHADER_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/shaders
+    mesh.vert pbr.frag fullscreen.vert tonemap.frag)
+
 add_library(LumenCore STATIC
     src/Lumen/Agent/AgentSession.cpp
     src/Lumen/Core/Log.cpp
     src/Lumen/Core/UUID.cpp
     src/Lumen/Physics/PhysicsWorld.cpp
+    src/Lumen/Renderer/Mesh.cpp
     src/Lumen/Renderer/RenderDevice.cpp
+    src/Lumen/Renderer/Renderer.cpp
     src/Lumen/Scene/Scene.cpp
     src/Lumen/Scene/SceneSerializer.cpp
     src/Lumen/Scripting/ScriptEngine.cpp
+    ${LUMEN_SHADER_SOURCES}
 )
 target_include_directories(LumenCore PUBLIC src)
 target_link_libraries(LumenCore PUBLIC glm::glm EnTT::EnTT nlohmann_json::nlohmann_json nvrhi_vk nvrhi

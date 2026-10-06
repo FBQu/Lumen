@@ -6,6 +6,8 @@ add_executable(LumenTests
     PhysicsTests.cpp
     SerializerTests.cpp
     AgentTests.cpp
+    MeshTests.cpp
+    RendererTests.cpp
     RenderDeviceTests.cpp
 )
 target_link_libraries(LumenTests PRIVATE LumenCore doctest::doctest)
