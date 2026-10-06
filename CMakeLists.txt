@@ -13,6 +13,7 @@ include(cmake/Dependencies.cmake)
 
 add_subdirectory(Lumen)
 add_subdirectory(Apps/LumenAgent)
+add_subdirectory(Apps/LumenRenderDemo)
 
 if(LUMEN_BUILD_TESTS)
     enable_testing()

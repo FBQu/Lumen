@@ -41,6 +41,12 @@ FetchContent_MakeAvailable(glm entt lua sol2 JoltPhysics json nvrhi)
 # Vulkan headers come from the Vulkan-Headers target that nvrhi fetches.
 FetchContent_MakeAvailable(volk)
 
+# stb is header-only and unversioned; pinned to a commit. No CMake project is used.
+FetchContent_Declare(stb GIT_REPOSITORY https://github.com/nothings/stb.git GIT_TAG 2c980bb59875b0d32144a71867fbdebb2f77cd20 SOURCE_SUBDIR _none)
+FetchContent_MakeAvailable(stb)
+add_library(Stb INTERFACE)
+target_include_directories(Stb SYSTEM INTERFACE ${stb_SOURCE_DIR})
+
 # Lua ships no CMake build; compile the interpreter core as a static C library (no lua.c / luac.c).
 # No platform defines on purpose: dlopen-based native module loading stays disabled.
 file(GLOB LUA_SOURCES ${lua_SOURCE_DIR}/*.c)
