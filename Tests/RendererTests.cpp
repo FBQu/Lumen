@@ -583,3 +583,247 @@ TEST_CASE("End to end: a glTF file is imported, instantiated and rendered")
 	CHECK(inside[0] > inside[1] + 60);
 	CHECK(Luminance(outside) < 60.0f);
 }
+
+// ---------------------------------------------------------------------------------------------
+// Image-based lighting
+// ---------------------------------------------------------------------------------------------
+
+#include "Lumen/Renderer/Environment.h"
+#include "Lumen/Renderer/HalfFloat.h"
+
+namespace {
+
+	Ref<const Environment> BuildEnvironment(const ImageIO::HdrImage& image)
+	{
+		EnvironmentSettings settings;
+		settings.SpecularSize = 64;
+		settings.SpecularSamples = 128;
+		std::string error;
+		auto env = EnvironmentBuilder::FromEquirect(image, settings, &error);
+		REQUIRE_MESSAGE(env.has_value(), error);
+		return CreateRef<const Environment>(std::move(*env));
+	}
+
+	ImageIO::HdrImage UniformSky(float value)
+	{
+		ImageIO::HdrImage image;
+		image.Width = 128;
+		image.Height = 64;
+		image.Pixels.assign(static_cast<size_t>(image.Width) * image.Height * 4, value);
+		return image;
+	}
+
+	// Each direction gets the color of its dominant axis: +X red, -X cyan, +Y green, -Y magenta, +Z blue, -Z yellow.
+	ImageIO::HdrImage AxisSky()
+	{
+		ImageIO::HdrImage image = UniformSky(1.0f);
+		for (uint32_t y = 0; y < image.Height; y++)
+			for (uint32_t x = 0; x < image.Width; x++)
+			{
+				const glm::vec3 d = EnvironmentBuilder::EquirectToDirection({ (x + 0.5f) / image.Width, (y + 0.5f) / image.Height });
+				const glm::vec3 a = glm::abs(d);
+				glm::vec3 color;
+				if (a.x >= a.y && a.x >= a.z) color = d.x > 0 ? glm::vec3(1, 0, 0) : glm::vec3(0, 1, 1);
+				else if (a.y >= a.z) color = d.y > 0 ? glm::vec3(0, 1, 0) : glm::vec3(1, 0, 1);
+				else color = d.z > 0 ? glm::vec3(0, 0, 1) : glm::vec3(1, 1, 0);
+				float* p = &image.Pixels[(static_cast<size_t>(y) * image.Width + x) * 4];
+				p[0] = color.r; p[1] = color.g; p[2] = color.b; p[3] = 1.0f;
+			}
+		return image;
+	}
+
+	glm::vec3 HdrPixel(const ImageData& hdr, uint32_t x, uint32_t y)
+	{
+		const uint16_t* p = reinterpret_cast<const uint16_t*>(hdr.PixelAt(x, y));
+		return { HalfToFloat(p[0]), HalfToFloat(p[1]), HalfToFloat(p[2]) };
+	}
+
+	// A scene with only a camera (no directional light) so lighting comes purely from the environment.
+	struct IblScene
+	{
+		Scene SceneData;
+		Entity Camera;
+
+		IblScene()
+		{
+			Camera = SceneData.CreateEntity("Camera");
+			Camera.AddComponent<CameraComponent>();
+			Camera.GetComponent<TransformComponent>().Translation = { 0.0f, 0.0f, 4.0f };
+		}
+
+		Entity AddSphere(const MaterialData& material, float diameter = 2.0f)
+		{
+			Entity e = SceneData.CreateEntity("Sphere");
+			e.GetComponent<TransformComponent>().Scale = glm::vec3(diameter);
+			auto& mr = e.AddComponent<MeshRendererComponent>();
+			mr.Primitive = PrimitiveType::Sphere;
+			mr.Material = material;
+			return e;
+		}
+	};
+
+}
+
+TEST_CASE("White furnace: surfaces in a uniform white environment neither gain nor lose energy")
+{
+	auto device = GetTestRenderDevice();
+	if (!device)
+		return;
+
+	Ref<Renderer> renderer = MakeRenderer(device);
+	REQUIRE(renderer->SetEnvironment(BuildEnvironment(UniformSky(1.0f))));
+	CHECK(renderer->HasEnvironment());
+
+	struct Case { float Metallic, Roughness; };
+	for (const Case& c : { Case{ 0.0f, 0.2f }, Case{ 0.0f, 0.9f }, Case{ 1.0f, 0.2f }, Case{ 1.0f, 0.9f } })
+	{
+		IblScene scene;
+		scene.AddSphere({ { 1.0f, 1.0f, 1.0f, 1.0f }, c.Metallic, c.Roughness, { 0, 0, 0 } });
+		REQUIRE(renderer->Render(scene.SceneData, scene.Camera));
+
+		const glm::vec3 value = HdrPixel(device->ReadTexture(renderer->GetHdrTarget()), s_Size / 2, s_Size / 2);
+		INFO("metallic " << c.Metallic << " roughness " << c.Roughness << " -> " << value.r);
+		// The split-sum approximation is not exactly energy conserving; stay within about 12% of the ideal 1.0.
+		CHECK(value.r > 0.85f);
+		CHECK(value.r < 1.08f);
+		CHECK(value.r == doctest::Approx(value.g).epsilon(0.01));
+	}
+}
+
+TEST_CASE("Environment directions: a mirror sphere reflects each axis color where it should")
+{
+	auto device = GetTestRenderDevice();
+	if (!device)
+		return;
+
+	Ref<Renderer> renderer = MakeRenderer(device);
+	REQUIRE(renderer->SetEnvironment(BuildEnvironment(AxisSky())));
+	renderer->GetSettings().ShowBackground = false;
+
+	IblScene scene;
+	scene.AddSphere({ { 1.0f, 1.0f, 1.0f, 1.0f }, 1.0f, 0.0f, { 0, 0, 0 } }, 2.0f);
+	REQUIRE(renderer->Render(scene.SceneData, scene.Camera));
+	ImageData hdr = device->ReadTexture(renderer->GetHdrTarget());
+
+	// The sphere's screen radius is about 18 pixels; sample at 45 degrees around the center, where the view
+	// vector reflects to (almost exactly) the +/-X and +/-Y axes.
+	const uint32_t c = s_Size / 2, off = 12;
+	const glm::vec3 center = HdrPixel(hdr, c, c);
+	const glm::vec3 right = HdrPixel(hdr, c + off, c);
+	const glm::vec3 left = HdrPixel(hdr, c - off, c);
+	const glm::vec3 top = HdrPixel(hdr, c, c - off);
+	const glm::vec3 bottom = HdrPixel(hdr, c, c + off);
+
+	CHECK(center.b > 0.6f); CHECK(center.r < 0.2f); CHECK(center.g < 0.2f);       // +Z blue (reflecting straight back at the camera)
+	CHECK(right.r > 0.6f);  CHECK(right.g < 0.3f);  CHECK(right.b < 0.3f);       // +X red
+	CHECK(left.g > 0.6f);   CHECK(left.b > 0.6f);   CHECK(left.r < 0.3f);        // -X cyan
+	CHECK(top.g > 0.6f);    CHECK(top.r < 0.3f);    CHECK(top.b < 0.3f);         // +Y green
+	CHECK(bottom.r > 0.6f); CHECK(bottom.b > 0.6f); CHECK(bottom.g < 0.3f);      // -Y magenta
+}
+
+TEST_CASE("Sky background: each camera direction shows the right part of the environment")
+{
+	auto device = GetTestRenderDevice();
+	if (!device)
+		return;
+
+	Ref<Renderer> renderer = MakeRenderer(device);
+	REQUIRE(renderer->SetEnvironment(BuildEnvironment(AxisSky())));
+
+	struct Look { glm::vec3 Rotation; glm::vec3 Expected; const char* Name; };
+	const float h = glm::half_pi<float>();
+	const Look looks[] = {
+		{ { 0, 0, 0 }, { 1, 1, 0 }, "-Z yellow" },
+		{ { 0, h, 0 }, { 0, 1, 1 }, "-X cyan" },
+		{ { 0, -h, 0 }, { 1, 0, 0 }, "+X red" },
+		{ { 0, glm::pi<float>(), 0 }, { 0, 0, 1 }, "+Z blue" },
+		{ { h, 0, 0 }, { 0, 1, 0 }, "+Y green" },
+		{ { -h, 0, 0 }, { 1, 0, 1 }, "-Y magenta" },
+	};
+	for (const Look& look : looks)
+	{
+		IblScene scene;
+		scene.Camera.GetComponent<TransformComponent>().Rotation = look.Rotation;
+		REQUIRE(renderer->Render(scene.SceneData, scene.Camera));
+		const glm::vec3 value = HdrPixel(device->ReadTexture(renderer->GetHdrTarget()), s_Size / 2, s_Size / 2);
+		INFO(look.Name << " -> " << value.r << ", " << value.g << ", " << value.b);
+		CHECK(glm::length(value - look.Expected) < 0.15f);
+	}
+}
+
+TEST_CASE("Environment intensity, background toggle and removal")
+{
+	auto device = GetTestRenderDevice();
+	if (!device)
+		return;
+
+	Ref<Renderer> renderer = MakeRenderer(device);
+	renderer->GetSettings().ClearColor = glm::vec3(0.0f, 0.0f, 0.5f);
+	renderer->GetSettings().Ambient = glm::vec3(0.25f);
+	REQUIRE(renderer->SetEnvironment(BuildEnvironment(UniformSky(2.0f))));
+
+	IblScene scene;
+	auto centerValue = [&]
+	{
+		REQUIRE(renderer->Render(scene.SceneData, scene.Camera));
+		return HdrPixel(device->ReadTexture(renderer->GetHdrTarget()), 3, 3); // a corner: pure background
+	};
+
+	CHECK(centerValue().r == doctest::Approx(2.0f).epsilon(0.01));
+	renderer->GetSettings().EnvironmentIntensity = 0.5f;
+	CHECK(centerValue().r == doctest::Approx(1.0f).epsilon(0.01));
+	renderer->GetSettings().ShowBackground = false;
+	CHECK(centerValue().b == doctest::Approx(0.5f).epsilon(0.01)); // clear color instead of the sky
+	CHECK(centerValue().r == doctest::Approx(0.0f).epsilon(0.01));
+
+	// Removing the environment goes back to the constant ambient term for lighting.
+	REQUIRE(renderer->SetEnvironment(nullptr));
+	CHECK_FALSE(renderer->HasEnvironment());
+	IblScene lit;
+	lit.AddSphere({ { 1.0f, 1.0f, 1.0f, 1.0f }, 0.0f, 1.0f, { 0, 0, 0 } });
+	REQUIRE(renderer->Render(lit.SceneData, lit.Camera));
+	CHECK(HdrPixel(device->ReadTexture(renderer->GetHdrTarget()), s_Size / 2, s_Size / 2).r == doctest::Approx(0.25f).epsilon(0.05));
+}
+
+TEST_CASE("Diffuse lighting follows the environment: sky-facing surfaces are brighter than ground-facing ones")
+{
+	auto device = GetTestRenderDevice();
+	if (!device)
+		return;
+
+	ImageIO::HdrImage sky = UniformSky(0.0f);
+	for (uint32_t y = 0; y < sky.Height / 2; y++)
+		for (uint32_t x = 0; x < sky.Width; x++)
+			for (int c = 0; c < 3; c++)
+				sky.Pixels[(static_cast<size_t>(y) * sky.Width + x) * 4 + static_cast<size_t>(c)] = 3.0f;
+
+	Ref<Renderer> renderer = MakeRenderer(device);
+	REQUIRE(renderer->SetEnvironment(BuildEnvironment(sky)));
+	IblScene scene;
+	scene.AddSphere({ { 1.0f, 1.0f, 1.0f, 1.0f }, 0.0f, 1.0f, { 0, 0, 0 } });
+	REQUIRE(renderer->Render(scene.SceneData, scene.Camera));
+	ImageData hdr = device->ReadTexture(renderer->GetHdrTarget());
+
+	const float top = HdrPixel(hdr, s_Size / 2, s_Size / 2 - 12).r;
+	const float middle = HdrPixel(hdr, s_Size / 2, s_Size / 2).r;
+	const float bottom = HdrPixel(hdr, s_Size / 2, s_Size / 2 + 12).r;
+	CHECK(top > middle);
+	CHECK(middle > bottom);
+	CHECK(top > bottom * 3.0f);
+}
+
+TEST_CASE("Invalid environments are rejected without disturbing the current one")
+{
+	auto device = GetTestRenderDevice();
+	if (!device)
+		return;
+
+	Ref<Renderer> renderer = MakeRenderer(device);
+	CHECK_FALSE(renderer->HasEnvironment());
+	CHECK_FALSE(renderer->SetEnvironment(CreateRef<const Environment>())); // empty
+	CHECK_FALSE(renderer->HasEnvironment());
+
+	REQUIRE(renderer->SetEnvironment(BuildEnvironment(UniformSky(1.0f))));
+	CHECK_FALSE(renderer->SetEnvironment(CreateRef<const Environment>()));
+	CHECK(renderer->HasEnvironment()); // still the previous environment
+}

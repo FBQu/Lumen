@@ -25,6 +25,15 @@ ctest --test-dir build --output-on-failure
 - Macros are prefixed `LM_`. Log with `LM_TRACE/INFO/WARN/ERROR/FATAL`, assert with `LM_ASSERT`.
 - Tabs for indentation, Allman braces (see `.clang-format`).
 
+## Rendering conventions (learned the hard way)
+- nvrhi's Vulkan backend flips the viewport itself: clip space is +Y up (D3D/OpenGL style). Do NOT flip the projection.
+  Counter-clockwise triangles are front faces (`frontCounterClockwise = true`). Texture row 0 is the top of the image.
+- nvrhi requires binding slots to be unique across all layouts of one pipeline (set 0 uses slots 0-2, material set uses 8-12).
+- Every draw after `setGraphicsState` must call `setPushConstants` if the layout declares push constants.
+- Shaders live in `Lumen/shaders/`, are compiled with glslangValidator at build time and may `#include "frame.glsl"`.
+  `FrameConstants` in `Renderer.cpp` must match `frame.glsl` (std140).
+- GPU tests run on Mesa llvmpipe (software Vulkan). Set `LUMEN_REQUIRE_GPU=1` to make them fail instead of skip without Vulkan.
+
 ## Layout
 - `Lumen/` core static library (`LumenCore`): `Core/` base utilities, `Scene/` ECS (EnTT).
 - `Apps/LumenAgent/` headless JSON-over-stdio host for AI agents. Keep `Docs/AgentAPI.md` in sync with new commands.
@@ -32,5 +41,5 @@ ctest --test-dir build --output-on-failure
 
 ## Roadmap
 1. Core + ECS (done) 2. Lua scripting API (done: lifecycle, vec3, Transform, Scene API, sandbox; TODO: instruction-count limit, more components) 3. Physics (Jolt) (done: bodies, forces, raycast, tests; Lua API done; TODO: collision events, triggers, rebuild on component change) 4. Scene JSON serialization (done) 4b. Agent control API (done: AgentSession + LumenAgent stdio app, see Docs/AgentAPI.md; TODO: render/screenshot, asset import, prefab commands)
-5. Renderer (done: headless RenderDevice, shader embedding, primitives, forward PBR (directional light), HDR + ACES tonemap, GPU tests on llvmpipe; glTF importer (CPU side: meshes, materials, textures, nodes, tangents) done; asset manager, textured PBR materials (normal maps, alpha modes, double-sided), mip generation done; TODO: IBL, soft shadows, SSAO, GLFW window, gizmo) (GLFW, nvrhi/Vulkan, glTF, PBR, IBL, shadows, SSAO, HDR) 6. Editor + export
+5. Renderer (done: headless RenderDevice, shader embedding, primitives, forward PBR (directional light), HDR + ACES tonemap, GPU tests on llvmpipe; glTF importer (CPU side: meshes, materials, textures, nodes, tangents) done; asset manager, textured PBR materials (normal maps, alpha modes, double-sided), mip generation done; TODO: IBL (done: SH diffuse, GGX-prefiltered specular, BRDF LUT with multiple-scattering compensation, sky background, procedural sky), soft shadows, SSAO, GLFW window, gizmo) (GLFW, nvrhi/Vulkan, glTF, PBR, IBL, shadows, SSAO, HDR) 6. Editor + export
 7. Test scene exercising every component and the full scripting API

@@ -2,6 +2,7 @@
 
 #include "Lumen/Assets/ImageIO.h"
 #include "Lumen/Core/Log.h"
+#include "Lumen/Renderer/Environment.h"
 #include "Lumen/Renderer/Renderer.h"
 #include "Lumen/Scene/Entity.h"
 #include "Lumen/Scene/Scene.h"
@@ -23,8 +24,14 @@ int main(int argc, char** argv)
 	Ref<Renderer> renderer = Renderer::Create(device, width, height);
 	if (!renderer)
 		return 1;
-	renderer->GetSettings().Ambient = glm::vec3(0.12f, 0.13f, 0.16f);
-	renderer->GetSettings().ClearColor = glm::vec3(0.06f, 0.07f, 0.10f);
+	// Image-based lighting from a procedural sky (replace with EnvironmentBuilder::FromEquirect on a loaded .hdr image).
+	std::string error;
+	auto environment = EnvironmentBuilder::FromEquirect(EnvironmentBuilder::MakeProceduralSky(), {}, &error);
+	if (!environment || !renderer->SetEnvironment(CreateRef<const Environment>(std::move(*environment))))
+	{
+		LM_ERROR("Environment setup failed: {}", error);
+		return 1;
+	}
 
 	Scene scene;
 
@@ -34,7 +41,7 @@ int main(int argc, char** argv)
 	camera.GetComponent<TransformComponent>().Rotation = { glm::radians(-14.0f), 0.0f, 0.0f };
 
 	Entity sun = scene.CreateEntity("Sun");
-	sun.AddComponent<DirectionalLightComponent>().Intensity = 4.0f;
+	sun.AddComponent<DirectionalLightComponent>().Intensity = 2.5f;
 	sun.GetComponent<TransformComponent>().Rotation = { glm::radians(-50.0f), glm::radians(25.0f), 0.0f };
 
 	Entity ground = scene.CreateEntity("Ground");
@@ -70,7 +77,6 @@ int main(int argc, char** argv)
 	if (!renderer->Render(scene, camera))
 		return 1;
 
-	std::string error;
 	if (!ImageIO::WritePNG(output, renderer->ReadOutput(), &error))
 	{
 		LM_ERROR("{}", error);

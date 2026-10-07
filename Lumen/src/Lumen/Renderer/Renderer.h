@@ -10,6 +10,7 @@ namespace Lumen {
 
 	class Scene;
 	class AssetManager;
+	struct Environment;
 
 	// Forward PBR renderer: scene -> HDR (RGBA16F) -> ACES tonemap -> LDR (RGBA8, sRGB-encoded).
 	// Materials follow glTF's metallic-roughness model (base color, metallic-roughness, normal, occlusion, emissive
@@ -22,6 +23,8 @@ namespace Lumen {
 			float Exposure = 1.0f;
 			glm::vec3 Ambient = { 0.03f, 0.03f, 0.03f }; // constant ambient radiance (replaced by IBL when available)
 			glm::vec3 ClearColor = { 0.02f, 0.02f, 0.03f };
+			float EnvironmentIntensity = 1.0f; // scales image-based lighting and the background
+			bool ShowBackground = true;        // draw the environment as the sky instead of ClearColor
 		};
 
 		// Returns nullptr (after logging) if GPU resources cannot be created.
@@ -31,6 +34,12 @@ namespace Lumen {
 		Renderer& operator=(const Renderer&) = delete;
 
 		Settings& GetSettings();
+
+		// Enables image-based lighting from a precomputed environment (see Environment.h) and uploads it to the GPU.
+		// The renderer keeps a reference. Passing nullptr goes back to the constant Settings::Ambient term.
+		// Returns false (keeping the previous environment) if the GPU upload fails.
+		bool SetEnvironment(Ref<const Environment> environment);
+		bool HasEnvironment() const;
 		uint32_t GetWidth() const;
 		uint32_t GetHeight() const;
 

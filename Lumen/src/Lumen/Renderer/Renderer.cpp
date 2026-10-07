@@ -2,6 +2,8 @@
 
 #include "Lumen/Assets/AssetManager.h"
 #include "Lumen/Core/Log.h"
+#include "Lumen/Renderer/Environment.h"
+#include "Lumen/Renderer/HalfFloat.h"
 #include "Lumen/Renderer/Mesh.h"
 #include "Lumen/Renderer/MipChain.h"
 #include "Lumen/Scene/Scene.h"
@@ -21,6 +23,8 @@ extern const unsigned char g_Shader_mesh_vert[];
 extern const size_t g_Shader_mesh_vert_size;
 extern const unsigned char g_Shader_pbr_frag[];
 extern const size_t g_Shader_pbr_frag_size;
+extern const unsigned char g_Shader_sky_frag[];
+extern const size_t g_Shader_sky_frag_size;
 extern const unsigned char g_Shader_fullscreen_vert[];
 extern const size_t g_Shader_fullscreen_vert_size;
 extern const unsigned char g_Shader_tonemap_frag[];
@@ -35,11 +39,15 @@ namespace Lumen {
 		{
 			glm::mat4 View;
 			glm::mat4 Proj;
+			glm::mat4 InvViewProj;
 			glm::vec4 CameraPosition;
 			glm::vec4 LightDirection;
 			glm::vec4 LightColor;
 			glm::vec4 Ambient;
+			glm::vec4 SH[9];
+			glm::vec4 EnvParams; // x intensity, y highest specular mip, z environment present, w draw background
 		};
+		static_assert(sizeof(FrameConstants) == 3 * 64 + 4 * 16 + 9 * 16 + 16, "FrameConstants must match frame.glsl (std140)");
 
 		// Push constants, matches the Draw block in the shaders (128 bytes is the guaranteed Vulkan minimum).
 		struct DrawConstants
@@ -107,6 +115,15 @@ namespace Lumen {
 
 		nvrhi::BindingLayoutHandle SceneLayout, MaterialLayout, TonemapLayout;
 		nvrhi::BindingSetHandle SceneBindings, TonemapBindings, DefaultMaterialBindings;
+		nvrhi::GraphicsPipelineHandle SkyPipeline;
+
+		// Image-based lighting resources (dummies keep the bindings valid when no environment is set).
+		Ref<const Environment> CurrentEnvironment;
+		nvrhi::TextureHandle EnvSpecular, EnvBackground, BrdfLut;
+		nvrhi::TextureHandle DummyCube, DummyBackground, DummyLut;
+		nvrhi::SamplerHandle EnvSampler, SkySampler;
+		std::array<glm::vec4, 9> EnvSH{};
+		float EnvMaxMip = 0.0f;
 		nvrhi::InputLayoutHandle InputLayout;
 		std::array<nvrhi::GraphicsPipelineHandle, 3> ScenePipelines; // indexed by PipelineKind
 		nvrhi::GraphicsPipelineHandle TonemapPipeline;
@@ -190,12 +207,116 @@ namespace Lumen {
 		                                               nvrhi::ITexture* occlusion, nvrhi::ITexture* emissive)
 		{
 			return Gpu()->createBindingSet(nvrhi::BindingSetDesc()
-				.addItem(nvrhi::BindingSetItem::Texture_SRV(0, baseColor))
-				.addItem(nvrhi::BindingSetItem::Texture_SRV(1, metalRough))
-				.addItem(nvrhi::BindingSetItem::Texture_SRV(2, normal))
-				.addItem(nvrhi::BindingSetItem::Texture_SRV(3, occlusion))
-				.addItem(nvrhi::BindingSetItem::Texture_SRV(4, emissive))
-				.addItem(nvrhi::BindingSetItem::Sampler(0, MaterialSampler)), MaterialLayout);
+				.addItem(nvrhi::BindingSetItem::Texture_SRV(8, baseColor))
+				.addItem(nvrhi::BindingSetItem::Texture_SRV(9, metalRough))
+				.addItem(nvrhi::BindingSetItem::Texture_SRV(10, normal))
+				.addItem(nvrhi::BindingSetItem::Texture_SRV(11, occlusion))
+				.addItem(nvrhi::BindingSetItem::Texture_SRV(12, emissive))
+				.addItem(nvrhi::BindingSetItem::Sampler(8, MaterialSampler)), MaterialLayout);
+		}
+
+		nvrhi::TextureHandle CreateHalfTexture(uint32_t width, uint32_t height, uint32_t arraySize, uint32_t mips, nvrhi::Format format, const char* name)
+		{
+			nvrhi::TextureDesc desc;
+			desc.width = width;
+			desc.height = height;
+			desc.arraySize = arraySize;
+			desc.mipLevels = mips;
+			desc.format = format;
+			desc.dimension = arraySize == 6 ? nvrhi::TextureDimension::TextureCube : nvrhi::TextureDimension::Texture2D;
+			desc.isShaderResource = true;
+			desc.initialState = nvrhi::ResourceStates::ShaderResource;
+			desc.keepInitialState = true;
+			desc.debugName = name;
+			return Gpu()->createTexture(desc);
+		}
+
+		static std::vector<uint16_t> ToHalf(const float* data, size_t count)
+		{
+			std::vector<uint16_t> out(count);
+			for (size_t i = 0; i < count; i++)
+				out[i] = FloatToHalf(data[i]);
+			return out;
+		}
+
+		// (Re)creates the set-0 bindings from the current environment textures or the dummies.
+		void RebuildSceneBindings()
+		{
+			nvrhi::ITexture* specular = EnvSpecular ? EnvSpecular.Get() : DummyCube.Get();
+			nvrhi::ITexture* lut = BrdfLut ? BrdfLut.Get() : DummyLut.Get();
+			nvrhi::ITexture* background = EnvBackground ? EnvBackground.Get() : DummyBackground.Get();
+			SceneBindings = Gpu()->createBindingSet(nvrhi::BindingSetDesc()
+				.addItem(nvrhi::BindingSetItem::ConstantBuffer(0, FrameBuffer))
+				.addItem(nvrhi::BindingSetItem::PushConstants(1, sizeof(DrawConstants)))
+				.addItem(nvrhi::BindingSetItem::Texture_SRV(0, specular, nvrhi::Format::UNKNOWN, nvrhi::AllSubresources, nvrhi::TextureDimension::TextureCube))
+				.addItem(nvrhi::BindingSetItem::Texture_SRV(1, lut))
+				.addItem(nvrhi::BindingSetItem::Texture_SRV(2, background))
+				.addItem(nvrhi::BindingSetItem::Sampler(0, EnvSampler))
+				.addItem(nvrhi::BindingSetItem::Sampler(1, SkySampler)), SceneLayout);
+		}
+
+		bool SetEnvironmentImpl(Ref<const Environment> environment)
+		{
+			if (!environment)
+			{
+				CurrentEnvironment = nullptr;
+				EnvSpecular = nullptr;
+				EnvBackground = nullptr;
+				RebuildSceneBindings();
+				return true;
+			}
+
+			const CubeMapData& cube = environment->Specular;
+			const ImageIO::HdrImage& background = environment->Background;
+			if (cube.Size == 0 || cube.MipCount == 0 || background.Width == 0 || background.Height == 0)
+			{
+				LM_ERROR("Environment is empty");
+				return false;
+			}
+
+			nvrhi::TextureHandle specular = CreateHalfTexture(cube.Size, cube.Size, 6, cube.MipCount, nvrhi::Format::RGBA16_FLOAT, "EnvSpecular");
+			nvrhi::TextureHandle sky = CreateHalfTexture(background.Width, background.Height, 1, 1, nvrhi::Format::RGBA16_FLOAT, "EnvBackground");
+			if (!specular || !sky)
+				return false;
+
+			if (!BrdfLut)
+			{
+				constexpr uint32_t lutSize = 128;
+				const std::vector<float> lut = EnvironmentBuilder::BuildBrdfLut(lutSize, 128);
+				nvrhi::TextureHandle lutTexture = CreateHalfTexture(lutSize, lutSize, 1, 1, nvrhi::Format::RG16_FLOAT, "BrdfLut");
+				if (!lutTexture)
+					return false;
+				const std::vector<uint16_t> half = ToHalf(lut.data(), lut.size());
+				Device->ExecuteImmediate([&](nvrhi::ICommandList* commandList)
+				{
+					commandList->writeTexture(lutTexture, 0, 0, half.data(), static_cast<size_t>(lutSize) * 4);
+				});
+				BrdfLut = lutTexture;
+			}
+
+			Device->ExecuteImmediate([&](nvrhi::ICommandList* commandList)
+			{
+				for (uint32_t mip = 0; mip < cube.MipCount; mip++)
+				{
+					const uint32_t size = cube.MipSize(mip);
+					for (uint32_t face = 0; face < 6; face++)
+					{
+						const std::vector<uint16_t> half = ToHalf(cube.Pixels.data() + cube.Offset(mip, face), static_cast<size_t>(size) * size * 4);
+						commandList->writeTexture(specular, face, mip, half.data(), static_cast<size_t>(size) * 8);
+					}
+				}
+				const std::vector<uint16_t> half = ToHalf(background.Pixels.data(), background.Pixels.size());
+				commandList->writeTexture(sky, 0, 0, half.data(), static_cast<size_t>(background.Width) * 8);
+			});
+
+			CurrentEnvironment = std::move(environment);
+			EnvSpecular = specular;
+			EnvBackground = sky;
+			EnvMaxMip = static_cast<float>(cube.MipCount - 1);
+			for (size_t i = 0; i < 9; i++)
+				EnvSH[i] = glm::vec4(CurrentEnvironment->IrradianceSH[i], 0.0f);
+			RebuildSceneBindings();
+			return true;
 		}
 
 		bool Initialize()
@@ -231,14 +352,18 @@ namespace Lumen {
 			FrameBuffer = gpu->createBuffer(frameDesc);
 
 			TonemapSampler = gpu->createSampler(nvrhi::SamplerDesc().setAllFilters(true).setAllAddressModes(nvrhi::SamplerAddressMode::Clamp));
+			EnvSampler = gpu->createSampler(nvrhi::SamplerDesc().setAllFilters(true).setAllAddressModes(nvrhi::SamplerAddressMode::Clamp));
+			SkySampler = gpu->createSampler(nvrhi::SamplerDesc().setAllFilters(true)
+				.setAddressU(nvrhi::SamplerAddressMode::Wrap).setAddressV(nvrhi::SamplerAddressMode::Clamp).setAddressW(nvrhi::SamplerAddressMode::Clamp));
 			MaterialSampler = gpu->createSampler(nvrhi::SamplerDesc().setAllFilters(true).setAllAddressModes(nvrhi::SamplerAddressMode::Wrap).setMaxAnisotropy(8.0f));
 
 			// --- Shaders and layouts -------------------------------------------------------------------------------
 			nvrhi::ShaderHandle meshVs = CreateShader(gpu, nvrhi::ShaderType::Vertex, "mesh.vert", g_Shader_mesh_vert, g_Shader_mesh_vert_size);
 			nvrhi::ShaderHandle pbrPs = CreateShader(gpu, nvrhi::ShaderType::Pixel, "pbr.frag", g_Shader_pbr_frag, g_Shader_pbr_frag_size);
+			nvrhi::ShaderHandle skyPs = CreateShader(gpu, nvrhi::ShaderType::Pixel, "sky.frag", g_Shader_sky_frag, g_Shader_sky_frag_size);
 			nvrhi::ShaderHandle fullscreenVs = CreateShader(gpu, nvrhi::ShaderType::Vertex, "fullscreen.vert", g_Shader_fullscreen_vert, g_Shader_fullscreen_vert_size);
 			nvrhi::ShaderHandle tonemapPs = CreateShader(gpu, nvrhi::ShaderType::Pixel, "tonemap.frag", g_Shader_tonemap_frag, g_Shader_tonemap_frag_size);
-			if (!meshVs || !pbrPs || !fullscreenVs || !tonemapPs)
+			if (!meshVs || !pbrPs || !skyPs || !fullscreenVs || !tonemapPs)
 				return false;
 
 			std::array<nvrhi::VertexAttributeDesc, 4> attributes = {
@@ -252,19 +377,37 @@ namespace Lumen {
 			SceneLayout = gpu->createBindingLayout(nvrhi::BindingLayoutDesc()
 				.setVisibility(nvrhi::ShaderType::All)
 				.addItem(nvrhi::BindingLayoutItem::VolatileConstantBuffer(0))
-				.addItem(nvrhi::BindingLayoutItem::PushConstants(1, sizeof(DrawConstants))));
-			SceneBindings = gpu->createBindingSet(nvrhi::BindingSetDesc()
-				.addItem(nvrhi::BindingSetItem::ConstantBuffer(0, FrameBuffer))
-				.addItem(nvrhi::BindingSetItem::PushConstants(1, sizeof(DrawConstants))), SceneLayout);
+				.addItem(nvrhi::BindingLayoutItem::PushConstants(1, sizeof(DrawConstants)))
+				.addItem(nvrhi::BindingLayoutItem::Texture_SRV(0)) // specular cube
+				.addItem(nvrhi::BindingLayoutItem::Texture_SRV(1)) // BRDF LUT
+				.addItem(nvrhi::BindingLayoutItem::Texture_SRV(2)) // background
+				.addItem(nvrhi::BindingLayoutItem::Sampler(0))
+				.addItem(nvrhi::BindingLayoutItem::Sampler(1)));
+
+			// Dummies keep the environment bindings valid while no environment is set.
+			DummyCube = CreateHalfTexture(1, 1, 6, 1, nvrhi::Format::RGBA16_FLOAT, "DummyCube");
+			DummyBackground = CreateHalfTexture(1, 1, 1, 1, nvrhi::Format::RGBA16_FLOAT, "DummyBackground");
+			DummyLut = CreateHalfTexture(1, 1, 1, 1, nvrhi::Format::RG16_FLOAT, "DummyLut");
+			if (!DummyCube || !DummyBackground || !DummyLut)
+				return false;
+			Device->ExecuteImmediate([&](nvrhi::ICommandList* commandList)
+			{
+				const uint16_t zeros[4] = { 0, 0, 0, 0 };
+				for (uint32_t face = 0; face < 6; face++)
+					commandList->writeTexture(DummyCube, face, 0, zeros, 8);
+				commandList->writeTexture(DummyBackground, 0, 0, zeros, 8);
+				commandList->writeTexture(DummyLut, 0, 0, zeros, 4);
+			});
+			RebuildSceneBindings();
 
 			MaterialLayout = gpu->createBindingLayout(nvrhi::BindingLayoutDesc()
 				.setVisibility(nvrhi::ShaderType::Pixel)
-				.addItem(nvrhi::BindingLayoutItem::Texture_SRV(0))
-				.addItem(nvrhi::BindingLayoutItem::Texture_SRV(1))
-				.addItem(nvrhi::BindingLayoutItem::Texture_SRV(2))
-				.addItem(nvrhi::BindingLayoutItem::Texture_SRV(3))
-				.addItem(nvrhi::BindingLayoutItem::Texture_SRV(4))
-				.addItem(nvrhi::BindingLayoutItem::Sampler(0)));
+				.addItem(nvrhi::BindingLayoutItem::Texture_SRV(8))
+				.addItem(nvrhi::BindingLayoutItem::Texture_SRV(9))
+				.addItem(nvrhi::BindingLayoutItem::Texture_SRV(10))
+				.addItem(nvrhi::BindingLayoutItem::Texture_SRV(11))
+				.addItem(nvrhi::BindingLayoutItem::Texture_SRV(12))
+				.addItem(nvrhi::BindingLayoutItem::Sampler(8)));
 
 			WhiteSrgb = SolidTexture(255, 255, 255, 255, true, "DefaultWhiteSrgb");
 			WhiteLinear = SolidTexture(255, 255, 255, 255, false, "DefaultWhiteLinear");
@@ -297,8 +440,7 @@ namespace Lumen {
 				desc.renderState.depthStencilState.depthWriteEnable = kind != PipelineKind::Blend;
 				desc.renderState.depthStencilState.depthFunc = nvrhi::ComparisonFunc::Less;
 				desc.renderState.rasterState.cullMode = kind == PipelineKind::Opaque ? nvrhi::RasterCullMode::Back : nvrhi::RasterCullMode::None;
-				// The projection flips Y for Vulkan, which makes counter-clockwise (world) triangles clockwise in framebuffer space.
-				desc.renderState.rasterState.frontCounterClockwise = false;
+				desc.renderState.rasterState.frontCounterClockwise = true; // glTF and our primitives are counter-clockwise
 				if (kind == PipelineKind::Blend)
 				{
 					nvrhi::BlendState::RenderTarget& target = desc.renderState.blendState.targets[0];
@@ -323,6 +465,18 @@ namespace Lumen {
 			tonemapDesc.renderState.rasterState.cullMode = nvrhi::RasterCullMode::None;
 			TonemapPipeline = gpu->createGraphicsPipeline(tonemapDesc, OutputFramebuffer->getFramebufferInfo());
 			if (!TonemapPipeline)
+				return false;
+
+			nvrhi::GraphicsPipelineDesc skyDesc;
+			skyDesc.setPrimType(nvrhi::PrimitiveType::TriangleList)
+				.setVertexShader(fullscreenVs)
+				.setPixelShader(skyPs)
+				.addBindingLayout(SceneLayout);
+			skyDesc.renderState.depthStencilState.depthTestEnable = false;
+			skyDesc.renderState.depthStencilState.depthWriteEnable = false;
+			skyDesc.renderState.rasterState.cullMode = nvrhi::RasterCullMode::None;
+			SkyPipeline = gpu->createGraphicsPipeline(skyDesc, SceneFramebuffer->getFramebufferInfo());
+			if (!SkyPipeline)
 				return false;
 
 			PrimitiveMeshes[static_cast<size_t>(PrimitiveType::Cube)] = UploadMesh(MeshGenerator::CreateCube(), "Cube");
@@ -400,6 +554,8 @@ namespace Lumen {
 	}
 
 	Renderer::Settings& Renderer::GetSettings() { return m_Impl->RenderSettings; }
+	bool Renderer::SetEnvironment(Ref<const Environment> environment) { return m_Impl->SetEnvironmentImpl(std::move(environment)); }
+	bool Renderer::HasEnvironment() const { return m_Impl->CurrentEnvironment != nullptr; }
 	uint32_t Renderer::GetWidth() const { return m_Impl->Width; }
 	uint32_t Renderer::GetHeight() const { return m_Impl->Height; }
 	nvrhi::ITexture* Renderer::GetOutput() const { return m_Impl->Output; }
@@ -425,9 +581,15 @@ namespace Lumen {
 		FrameConstants frame{};
 		frame.View = glm::inverse(cameraWorld);
 		frame.Proj = glm::perspectiveRH_ZO(cameraData.FovY, static_cast<float>(impl.Width) / static_cast<float>(impl.Height), cameraData.Near, cameraData.Far);
-		frame.Proj[1][1] *= -1.0f; // Vulkan clip space has Y pointing down
+		// No Y flip: nvrhi's Vulkan backend flips the viewport itself, so clip space is +Y up like D3D/OpenGL.
+		frame.InvViewProj = glm::inverse(frame.Proj * frame.View);
 		frame.CameraPosition = glm::vec4(cameraTransform.Translation, 1.0f);
 		frame.Ambient = glm::vec4(impl.RenderSettings.Ambient, 0.0f);
+		const bool hasEnvironment = impl.CurrentEnvironment != nullptr;
+		frame.EnvParams = glm::vec4(impl.RenderSettings.EnvironmentIntensity, impl.EnvMaxMip, hasEnvironment ? 1.0f : 0.0f,
+		                            hasEnvironment && impl.RenderSettings.ShowBackground ? 1.0f : 0.0f);
+		for (size_t i = 0; i < 9; i++)
+			frame.SH[i] = hasEnvironment ? impl.EnvSH[i] : glm::vec4(0.0f);
 
 		// --- Light -----------------------------------------------------------------------------------------------------
 		frame.LightDirection = glm::vec4(0.0f, -1.0f, 0.0f, 0.0f);
@@ -507,6 +669,22 @@ namespace Lumen {
 			commandList->clearDepthStencilTexture(impl.Depth, nvrhi::AllSubresources, true, 1.0f, false, 0);
 
 			const nvrhi::Viewport viewport(static_cast<float>(impl.Width), static_cast<float>(impl.Height));
+
+			if (frame.EnvParams.w > 0.5f)
+			{
+				nvrhi::GraphicsState skyState;
+				skyState.setPipeline(impl.SkyPipeline)
+					.setFramebuffer(impl.SceneFramebuffer)
+					.setViewport(nvrhi::ViewportState().addViewportAndScissorRect(viewport))
+					.addBindingSet(impl.SceneBindings);
+				commandList->setGraphicsState(skyState);
+				const DrawConstants unused{}; // the shared scene layout declares push constants; nvrhi requires them to be set
+				commandList->setPushConstants(&unused, sizeof(unused));
+				nvrhi::DrawArguments sky;
+				sky.vertexCount = 3;
+				commandList->draw(sky);
+			}
+
 			for (const DrawItem& item : draws)
 			{
 				nvrhi::GraphicsState state;
