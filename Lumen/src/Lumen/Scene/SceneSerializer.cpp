@@ -267,6 +267,7 @@ namespace Lumen {
 				}
 				mr.MeshAsset = AssetIDOr(*it, "meshAsset");
 				mr.MaterialAsset = AssetIDOr(*it, "materialAsset");
+				mr.CastShadows = BoolOr(*it, "castShadows", mr.CastShadows);
 				data.MeshRenderer = mr;
 			}
 
@@ -338,7 +339,8 @@ namespace Lumen {
 				                  { "roughness", mr->Material.Roughness }, { "emissive", VecToJson(mr->Material.Emissive) } };
 				e["meshRenderer"] = { { "primitive", ToString(mr->Primitive) }, { "material", material },
 				                      { "meshAsset", std::to_string(static_cast<uint64_t>(mr->MeshAsset)) },
-				                      { "materialAsset", std::to_string(static_cast<uint64_t>(mr->MaterialAsset)) } };
+				                      { "materialAsset", std::to_string(static_cast<uint64_t>(mr->MaterialAsset)) },
+				                      { "castShadows", mr->CastShadows } };
 			}
 			if (const auto* camera = registry.try_get<CameraComponent>(handle))
 				e["camera"] = { { "fovDegrees", glm::degrees(camera->FovY) }, { "near", camera->Near }, { "far", camera->Far } };

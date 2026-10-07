@@ -6,6 +6,7 @@
 #include "Lumen/Renderer/HalfFloat.h"
 #include "Lumen/Renderer/Mesh.h"
 #include "Lumen/Renderer/MipChain.h"
+#include "Lumen/Renderer/Shadow.h"
 #include "Lumen/Scene/Scene.h"
 
 #include <glm/gtc/matrix_transform.hpp>
@@ -23,6 +24,8 @@ extern const unsigned char g_Shader_mesh_vert[];
 extern const size_t g_Shader_mesh_vert_size;
 extern const unsigned char g_Shader_pbr_frag[];
 extern const size_t g_Shader_pbr_frag_size;
+extern const unsigned char g_Shader_shadow_vert[];
+extern const size_t g_Shader_shadow_vert_size;
 extern const unsigned char g_Shader_sky_frag[];
 extern const size_t g_Shader_sky_frag_size;
 extern const unsigned char g_Shader_fullscreen_vert[];
@@ -46,8 +49,18 @@ namespace Lumen {
 			glm::vec4 Ambient;
 			glm::vec4 SH[9];
 			glm::vec4 EnvParams; // x intensity, y highest specular mip, z environment present, w draw background
+			glm::mat4 LightViewProj;
+			glm::vec4 ShadowParams;  // x shadows on, y receiver depth bias, z normal offset (world units), w tan(light angular radius)
+			glm::vec4 ShadowParams2; // x depth range (world units), y ortho width (world units), z texel size in uv
 		};
-		static_assert(sizeof(FrameConstants) == 3 * 64 + 4 * 16 + 9 * 16 + 16, "FrameConstants must match frame.glsl (std140)");
+		static_assert(sizeof(FrameConstants) == 3 * 64 + 4 * 16 + 9 * 16 + 16 + 64 + 2 * 16, "FrameConstants must match frame.glsl (std140)");
+
+		struct ShadowConstants
+		{
+			glm::mat4 Model;
+			glm::mat4 LightViewProj;
+		};
+		static_assert(sizeof(ShadowConstants) == 128, "shadow push constants must fit the 128 byte guaranteed minimum");
 
 		// Push constants, matches the Draw block in the shaders (128 bytes is the guaranteed Vulkan minimum).
 		struct DrawConstants
@@ -65,6 +78,7 @@ namespace Lumen {
 			nvrhi::BufferHandle VertexBuffer;
 			nvrhi::BufferHandle IndexBuffer;
 			uint32_t IndexCount = 0;
+			Bounds LocalBounds;
 		};
 
 		enum class PipelineKind { Opaque = 0, DoubleSided = 1, Blend = 2 };
@@ -76,6 +90,8 @@ namespace Lumen {
 			DrawConstants Constants{};
 			PipelineKind Kind = PipelineKind::Opaque;
 			float Distance = 0.0f; // from the camera, for sorting blended items
+			bool CastsShadow = false;
+			Bounds WorldBounds;
 		};
 
 		constexpr nvrhi::Format s_HdrFormat = nvrhi::Format::RGBA16_FLOAT;
@@ -117,6 +133,15 @@ namespace Lumen {
 		nvrhi::BindingSetHandle SceneBindings, TonemapBindings, DefaultMaterialBindings;
 		nvrhi::GraphicsPipelineHandle SkyPipeline;
 
+		// Shadow mapping.
+		uint32_t ShadowSize = 2048;
+		nvrhi::TextureHandle ShadowMap;
+		nvrhi::SamplerHandle ShadowSampler;
+		nvrhi::FramebufferHandle ShadowFramebuffer;
+		nvrhi::BindingLayoutHandle ShadowLayout;
+		nvrhi::BindingSetHandle ShadowBindings;
+		nvrhi::GraphicsPipelineHandle ShadowPipeline;
+
 		// Image-based lighting resources (dummies keep the bindings valid when no environment is set).
 		Ref<const Environment> CurrentEnvironment;
 		nvrhi::TextureHandle EnvSpecular, EnvBackground, BrdfLut;
@@ -144,6 +169,8 @@ namespace Lumen {
 			LM_ASSERT(mesh.IsValid(), "invalid mesh");
 			GpuMesh gpu;
 			gpu.IndexCount = static_cast<uint32_t>(mesh.Indices.size());
+			for (const Vertex& v : mesh.Vertices)
+				gpu.LocalBounds.Expand(v.Position);
 
 			nvrhi::BufferDesc vertexDesc;
 			vertexDesc.byteSize = mesh.Vertices.size() * sizeof(Vertex);
@@ -251,8 +278,10 @@ namespace Lumen {
 				.addItem(nvrhi::BindingSetItem::Texture_SRV(0, specular, nvrhi::Format::UNKNOWN, nvrhi::AllSubresources, nvrhi::TextureDimension::TextureCube))
 				.addItem(nvrhi::BindingSetItem::Texture_SRV(1, lut))
 				.addItem(nvrhi::BindingSetItem::Texture_SRV(2, background))
+				.addItem(nvrhi::BindingSetItem::Texture_SRV(3, ShadowMap))
 				.addItem(nvrhi::BindingSetItem::Sampler(0, EnvSampler))
-				.addItem(nvrhi::BindingSetItem::Sampler(1, SkySampler)), SceneLayout);
+				.addItem(nvrhi::BindingSetItem::Sampler(1, SkySampler))
+				.addItem(nvrhi::BindingSetItem::Sampler(2, ShadowSampler)), SceneLayout);
 		}
 
 		bool SetEnvironmentImpl(Ref<const Environment> environment)
@@ -381,8 +410,26 @@ namespace Lumen {
 				.addItem(nvrhi::BindingLayoutItem::Texture_SRV(0)) // specular cube
 				.addItem(nvrhi::BindingLayoutItem::Texture_SRV(1)) // BRDF LUT
 				.addItem(nvrhi::BindingLayoutItem::Texture_SRV(2)) // background
+				.addItem(nvrhi::BindingLayoutItem::Texture_SRV(3)) // shadow map
 				.addItem(nvrhi::BindingLayoutItem::Sampler(0))
-				.addItem(nvrhi::BindingLayoutItem::Sampler(1)));
+				.addItem(nvrhi::BindingLayoutItem::Sampler(1))
+				.addItem(nvrhi::BindingLayoutItem::Sampler(2)));
+
+			// Shadow map and its depth-only pass.
+			nvrhi::TextureDesc shadowDesc;
+			shadowDesc.width = ShadowSize;
+			shadowDesc.height = ShadowSize;
+			shadowDesc.format = nvrhi::Format::D32;
+			shadowDesc.isRenderTarget = true;
+			shadowDesc.isShaderResource = true;
+			shadowDesc.initialState = nvrhi::ResourceStates::ShaderResource;
+			shadowDesc.keepInitialState = true;
+			shadowDesc.debugName = "ShadowMap";
+			ShadowMap = gpu->createTexture(shadowDesc);
+			ShadowSampler = gpu->createSampler(nvrhi::SamplerDesc().setAllFilters(false).setAllAddressModes(nvrhi::SamplerAddressMode::Clamp));
+			if (!ShadowMap || !ShadowSampler)
+				return false;
+			ShadowFramebuffer = gpu->createFramebuffer(nvrhi::FramebufferDesc().setDepthAttachment(ShadowMap));
 
 			// Dummies keep the environment bindings valid while no environment is set.
 			DummyCube = CreateHalfTexture(1, 1, 6, 1, nvrhi::Format::RGBA16_FLOAT, "DummyCube");
@@ -479,6 +526,27 @@ namespace Lumen {
 			if (!SkyPipeline)
 				return false;
 
+			nvrhi::ShaderHandle shadowVs = CreateShader(gpu, nvrhi::ShaderType::Vertex, "shadow.vert", g_Shader_shadow_vert, g_Shader_shadow_vert_size);
+			ShadowLayout = gpu->createBindingLayout(nvrhi::BindingLayoutDesc()
+				.setVisibility(nvrhi::ShaderType::Vertex)
+				.addItem(nvrhi::BindingLayoutItem::PushConstants(1, sizeof(ShadowConstants))));
+			ShadowBindings = gpu->createBindingSet(nvrhi::BindingSetDesc().addItem(nvrhi::BindingSetItem::PushConstants(1, sizeof(ShadowConstants))), ShadowLayout);
+			nvrhi::GraphicsPipelineDesc shadowPipelineDesc;
+			shadowPipelineDesc.setPrimType(nvrhi::PrimitiveType::TriangleList)
+				.setInputLayout(InputLayout)
+				.setVertexShader(shadowVs)
+				.addBindingLayout(ShadowLayout);
+			shadowPipelineDesc.renderState.depthStencilState.depthTestEnable = true;
+			shadowPipelineDesc.renderState.depthStencilState.depthWriteEnable = true;
+			shadowPipelineDesc.renderState.depthStencilState.depthFunc = nvrhi::ComparisonFunc::Less;
+			shadowPipelineDesc.renderState.rasterState.cullMode = nvrhi::RasterCullMode::Back;
+			shadowPipelineDesc.renderState.rasterState.frontCounterClockwise = true;
+			shadowPipelineDesc.renderState.rasterState.depthBias = 2;
+			shadowPipelineDesc.renderState.rasterState.slopeScaledDepthBias = 2.0f;
+			ShadowPipeline = gpu->createGraphicsPipeline(shadowPipelineDesc, ShadowFramebuffer->getFramebufferInfo());
+			if (!ShadowPipeline)
+				return false;
+
 			PrimitiveMeshes[static_cast<size_t>(PrimitiveType::Cube)] = UploadMesh(MeshGenerator::CreateCube(), "Cube");
 			PrimitiveMeshes[static_cast<size_t>(PrimitiveType::Sphere)] = UploadMesh(MeshGenerator::CreateSphere(48, 24), "Sphere");
 			PrimitiveMeshes[static_cast<size_t>(PrimitiveType::Plane)] = UploadMesh(MeshGenerator::CreatePlane(), "Plane");
@@ -526,11 +594,11 @@ namespace Lumen {
 		}
 	};
 
-	Ref<Renderer> Renderer::Create(Ref<RenderDevice> device, uint32_t width, uint32_t height)
+	Ref<Renderer> Renderer::Create(Ref<RenderDevice> device, uint32_t width, uint32_t height, uint32_t shadowMapSize)
 	{
-		if (!device || width == 0 || height == 0)
+		if (!device || width == 0 || height == 0 || shadowMapSize < 256 || shadowMapSize > 8192)
 		{
-			LM_ERROR("Renderer needs a device and a non-zero size");
+			LM_ERROR("Renderer needs a device, a non-zero size and a shadow map size between 256 and 8192");
 			return nullptr;
 		}
 
@@ -539,6 +607,7 @@ namespace Lumen {
 		renderer->m_Impl->Device = std::move(device);
 		renderer->m_Impl->Width = width;
 		renderer->m_Impl->Height = height;
+		renderer->m_Impl->ShadowSize = shadowMapSize;
 		if (!renderer->m_Impl->Initialize())
 		{
 			LM_ERROR("Failed to create renderer GPU resources");
@@ -594,9 +663,11 @@ namespace Lumen {
 		// --- Light -----------------------------------------------------------------------------------------------------
 		frame.LightDirection = glm::vec4(0.0f, -1.0f, 0.0f, 0.0f);
 		frame.LightColor = glm::vec4(0.0f);
+		bool hasLight = false;
 		for (auto [handle, transform, light] : registry.view<TransformComponent, DirectionalLightComponent>().each())
 		{
 			const glm::vec3 direction = glm::quat(transform.Rotation) * glm::vec3(0.0f, 0.0f, -1.0f);
+			hasLight = light.Intensity > 0.0f;
 			frame.LightDirection = glm::vec4(direction, 0.0f);
 			frame.LightColor = glm::vec4(light.Color, light.Intensity);
 			break; // a single directional light for now
@@ -651,6 +722,8 @@ namespace Lumen {
 				}
 			}
 			item.Distance = glm::length(glm::vec3(item.Constants.Model[3]) - cameraTransform.Translation);
+			item.WorldBounds = item.Mesh->LocalBounds.Transformed(item.Constants.Model);
+			item.CastsShadow = renderer.CastShadows && item.Kind != PipelineKind::Blend;
 			draws.push_back(item);
 		}
 
@@ -658,6 +731,23 @@ namespace Lumen {
 		std::stable_partition(draws.begin(), draws.end(), [](const DrawItem& d) { return d.Kind != PipelineKind::Blend; });
 		auto firstBlend = std::find_if(draws.begin(), draws.end(), [](const DrawItem& d) { return d.Kind == PipelineKind::Blend; });
 		std::stable_sort(firstBlend, draws.end(), [](const DrawItem& a, const DrawItem& b) { return a.Distance > b.Distance; });
+
+		// --- Shadow cascade --------------------------------------------------------------------------------------------
+		ShadowCascade cascade;
+		bool shadowsActive = false;
+		if (impl.RenderSettings.EnableShadows && hasLight)
+		{
+			Bounds casters;
+			for (const DrawItem& item : draws)
+				if (item.CastsShadow)
+					casters.Expand(item.WorldBounds);
+			shadowsActive = !casters.IsEmpty()
+				&& ComputeDirectionalShadow(cameraWorld, cameraData.FovY, static_cast<float>(impl.Width) / static_cast<float>(impl.Height), cameraData.Near,
+				                            cameraData.Far, impl.RenderSettings.ShadowDistance, glm::vec3(frame.LightDirection), casters, impl.ShadowSize, cascade);
+		}
+		frame.LightViewProj = cascade.ViewProj;
+		frame.ShadowParams = glm::vec4(shadowsActive ? 1.0f : 0.0f, 0.0005f, 1.5f * cascade.TexelWorldSize, std::max(impl.RenderSettings.ShadowSoftness, 0.0f));
+		frame.ShadowParams2 = glm::vec4(cascade.DepthRange, 2.0f * cascade.Radius, 1.0f / static_cast<float>(impl.ShadowSize), 0.0f);
 
 		// --- Record ----------------------------------------------------------------------------------------------------
 		impl.Device->ExecuteImmediate([&](nvrhi::ICommandList* commandList)
@@ -667,6 +757,30 @@ namespace Lumen {
 			const glm::vec3& clear = impl.RenderSettings.ClearColor;
 			commandList->clearTextureFloat(impl.Hdr, nvrhi::AllSubresources, nvrhi::Color(clear.r, clear.g, clear.b, 1.0f));
 			commandList->clearDepthStencilTexture(impl.Depth, nvrhi::AllSubresources, true, 1.0f, false, 0);
+
+			if (shadowsActive)
+			{
+				commandList->clearDepthStencilTexture(impl.ShadowMap, nvrhi::AllSubresources, true, 1.0f, false, 0);
+				const nvrhi::Viewport shadowViewport(static_cast<float>(impl.ShadowSize), static_cast<float>(impl.ShadowSize));
+				for (const DrawItem& item : draws)
+				{
+					if (!item.CastsShadow)
+						continue;
+					nvrhi::GraphicsState shadowState;
+					shadowState.setPipeline(impl.ShadowPipeline)
+						.setFramebuffer(impl.ShadowFramebuffer)
+						.setViewport(nvrhi::ViewportState().addViewportAndScissorRect(shadowViewport))
+						.addBindingSet(impl.ShadowBindings);
+					shadowState.vertexBuffers = { { item.Mesh->VertexBuffer, 0, 0 } };
+					shadowState.indexBuffer = { item.Mesh->IndexBuffer, nvrhi::Format::R32_UINT, 0 };
+					commandList->setGraphicsState(shadowState);
+					const ShadowConstants constants{ item.Constants.Model, cascade.ViewProj };
+					commandList->setPushConstants(&constants, sizeof(constants));
+					nvrhi::DrawArguments shadowArgs;
+					shadowArgs.vertexCount = item.Mesh->IndexCount;
+					commandList->drawIndexed(shadowArgs);
+				}
+			}
 
 			const nvrhi::Viewport viewport(static_cast<float>(impl.Width), static_cast<float>(impl.Height));
 

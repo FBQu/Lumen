@@ -11,4 +11,7 @@ layout(set = 0, binding = 256) uniform Frame
 	vec4 uAmbient;    // rgb constant ambient radiance, used when there is no environment
 	vec4 uSH[9];      // diffuse irradiance / pi as spherical harmonics (premultiplied by the cosine lobe)
 	vec4 uEnvParams;  // x intensity, y highest specular mip, z 1 if an environment is set, w 1 to draw it as background
+	mat4 uLightViewProj;
+	vec4 uShadowParams;  // x 1 if shadows are on, y receiver depth bias, z normal offset (world units), w tan(light angular radius)
+	vec4 uShadowParams2; // x depth range (world units), y ortho width (world units), z texel size in uv
 };

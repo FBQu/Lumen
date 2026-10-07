@@ -25,10 +25,14 @@ namespace Lumen {
 			glm::vec3 ClearColor = { 0.02f, 0.02f, 0.03f };
 			float EnvironmentIntensity = 1.0f; // scales image-based lighting and the background
 			bool ShowBackground = true;        // draw the environment as the sky instead of ClearColor
+			bool EnableShadows = true;         // soft shadows from the first directional light
+			float ShadowDistance = 60.0f;      // shadows are rendered for the camera frustum up to this distance
+			float ShadowSoftness = 0.02f;      // tan of the light's angular radius: larger = softer, 0 = hard-edged (PCF only)
 		};
 
-		// Returns nullptr (after logging) if GPU resources cannot be created.
-		static Ref<Renderer> Create(Ref<RenderDevice> device, uint32_t width, uint32_t height);
+		// Returns nullptr (after logging) if GPU resources cannot be created. `shadowMapSize` is the edge length of the
+		// shadow map (256 to 8192).
+		static Ref<Renderer> Create(Ref<RenderDevice> device, uint32_t width, uint32_t height, uint32_t shadowMapSize = 2048);
 		~Renderer();
 		Renderer(const Renderer&) = delete;
 		Renderer& operator=(const Renderer&) = delete;

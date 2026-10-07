@@ -152,6 +152,7 @@ TEST_CASE("Render components round-trip through JSON")
 	mr.Material.Emissive = { 1.0f, 2.0f, 3.0f };
 	mr.MeshAsset = UUID(18446744073709551615ull);
 	mr.MaterialAsset = UUID(42);
+	mr.CastShadows = false;
 
 	Entity camera = original.CreateEntityWithUUID(UUID(101), "Cam");
 	camera.AddComponent<CameraComponent>().FovY = glm::radians(75.0f);
@@ -173,6 +174,7 @@ TEST_CASE("Render components round-trip through JSON")
 	CHECK(m.Material.Emissive == glm::vec3(1.0f, 2.0f, 3.0f));
 	CHECK(static_cast<uint64_t>(m.MeshAsset) == 18446744073709551615ull);
 	CHECK(static_cast<uint64_t>(m.MaterialAsset) == 42);
+	CHECK_FALSE(m.CastShadows);
 
 	const auto& c = loaded.FindEntityByUUID(UUID(101)).GetComponent<CameraComponent>();
 	CHECK(glm::degrees(c.FovY) == doctest::Approx(75.0f).epsilon(1e-4));

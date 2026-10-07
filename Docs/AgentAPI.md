@@ -22,7 +22,7 @@ failed commands leave the scene unchanged. Entity ids are decimal strings (64-bi
   "script":    { "source": "return { OnUpdate = function(self, dt) end }" },
   "meshRenderer": { "primitive": "cube|sphere|plane",
                     "material": { "baseColor": [1,1,1,1], "metallic": 0, "roughness": 0.5, "emissive": [0,0,0] },
-                    "meshAsset": "0", "materialAsset": "0" },
+                    "meshAsset": "0", "materialAsset": "0", "castShadows": true },
   "camera": { "fovDegrees": 60, "near": 0.1, "far": 1000 },
   "directionalLight": { "color": [1,1,1], "intensity": 3 } }
 ```

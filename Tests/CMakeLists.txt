@@ -15,6 +15,7 @@ add_executable(LumenTests
     MipChainTests.cpp
     RendererTests.cpp
     RenderDeviceTests.cpp
+    ShadowTests.cpp
 )
 target_link_libraries(LumenTests PRIVATE LumenCore doctest::doctest)
 

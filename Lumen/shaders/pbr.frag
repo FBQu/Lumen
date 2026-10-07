@@ -13,6 +13,10 @@ layout(set = 0, binding = 0) uniform textureCube uEnvSpecular;
 layout(set = 0, binding = 1) uniform texture2D uBrdfLut;
 layout(set = 0, binding = 128) uniform sampler uEnvSampler;
 
+// Directional light shadow map (depth, 0 = near) and a nearest-filter sampler.
+layout(set = 0, binding = 3) uniform texture2D uShadowMap;
+layout(set = 0, binding = 130) uniform sampler uShadowSampler;
+
 layout(push_constant) uniform Draw
 {
 	mat4 uModel;
@@ -52,6 +56,64 @@ float GeometrySchlickGGX(float NoX, float roughness)
 vec3 FresnelSchlick(float VoH, vec3 f0)
 {
 	return f0 + (1.0 - f0) * pow(clamp(1.0 - VoH, 0.0, 1.0), 5.0);
+}
+
+float InterleavedGradientNoise(vec2 p)
+{
+	return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715))));
+}
+
+vec2 VogelDisk(int index, int count, float phi)
+{
+	float r = sqrt((float(index) + 0.5) / float(count));
+	float theta = float(index) * 2.39996323 + phi;
+	return r * vec2(cos(theta), sin(theta));
+}
+
+// Percentage-closer soft shadows: a blocker search estimates the penumbra width (contact hardening), then a
+// rotated Vogel-disk PCF filter of that width is applied. Returns 1 when fully lit.
+float ShadowFactor(vec3 worldPos, vec3 geometricNormal)
+{
+	if (uShadowParams.x < 0.5)
+		return 1.0;
+
+	vec4 lightClip = uLightViewProj * vec4(worldPos + geometricNormal * uShadowParams.z, 1.0);
+	vec3 proj = lightClip.xyz / lightClip.w;
+	vec2 uv = vec2(proj.x * 0.5 + 0.5, 0.5 - proj.y * 0.5); // texture row 0 is the top (NDC y = +1)
+	if (any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0))) || proj.z > 1.0)
+		return 1.0;
+
+	float receiver = proj.z - uShadowParams.y;
+	float rotation = InterleavedGradientNoise(gl_FragCoord.xy) * 6.2831853;
+	float depthRange = uShadowParams2.x;
+	float orthoWidth = uShadowParams2.y;
+	float texel = uShadowParams2.z;
+	float lightTan = uShadowParams.w;
+
+	float searchRadius = clamp(lightTan * receiver * depthRange / orthoWidth, texel * 2.0, 0.05);
+	float blockerSum = 0.0;
+	float blockers = 0.0;
+	for (int i = 0; i < 16; i++)
+	{
+		float d = textureLod(sampler2D(uShadowMap, uShadowSampler), uv + VogelDisk(i, 16, rotation) * searchRadius, 0.0).r;
+		if (d < receiver)
+		{
+			blockerSum += d;
+			blockers += 1.0;
+		}
+	}
+	if (blockers < 0.5)
+		return 1.0;
+
+	float averageBlocker = blockerSum / blockers;
+	float penumbra = clamp((receiver - averageBlocker) * depthRange * lightTan / orthoWidth, texel * 1.5, 0.06);
+	float lit = 0.0;
+	for (int i = 0; i < 24; i++)
+	{
+		float d = textureLod(sampler2D(uShadowMap, uShadowSampler), uv + VogelDisk(i, 24, rotation) * penumbra, 0.0).r;
+		lit += receiver <= d ? 1.0 : 0.0;
+	}
+	return lit / 24.0;
 }
 
 vec3 FresnelSchlickRoughness(float NoV, vec3 f0, float roughness)
@@ -115,7 +177,11 @@ void main()
 	vec3 diffuse = (1.0 - F) * (1.0 - metallic) * albedo / PI;
 
 	vec3 radiance = uLightColor.rgb * uLightColor.w;
-	vec3 color = (diffuse + specular) * radiance * NoL;
+	vec3 geometricNormal = normalize(vNormal);
+	if (!gl_FrontFacing)
+		geometricNormal = -geometricNormal;
+	float shadow = NoL > 0.0 ? ShadowFactor(vWorldPos, geometricNormal) : 1.0;
+	vec3 color = (diffuse + specular) * radiance * NoL * shadow;
 
 	float occlusion = 1.0 + uParams.y * (texture(sampler2D(uOcclusionTex, uSampler), vUV).r - 1.0);
 	if (uEnvParams.z > 0.5)

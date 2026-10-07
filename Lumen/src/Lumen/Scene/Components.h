@@ -91,6 +91,7 @@ namespace Lumen {
 		MaterialData Material;
 		UUID MeshAsset = UUID(0);
 		UUID MaterialAsset = UUID(0);
+		bool CastShadows = true; // translucent (alpha < 1) objects never cast shadows
 	};
 
 	// Perspective camera looking down the entity's local -Z axis.

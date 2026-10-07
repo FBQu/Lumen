@@ -827,3 +827,237 @@ TEST_CASE("Invalid environments are rejected without disturbing the current one"
 	CHECK_FALSE(renderer->SetEnvironment(CreateRef<const Environment>()));
 	CHECK(renderer->HasEnvironment()); // still the previous environment
 }
+
+// ---------------------------------------------------------------------------------------------
+// Shadows
+// ---------------------------------------------------------------------------------------------
+
+namespace {
+
+	constexpr uint32_t s_ShadowFrame = 128;
+
+	Ref<Renderer> MakeShadowRenderer(const Ref<RenderDevice>& device, uint32_t shadowMapSize = 1024)
+	{
+		Ref<Renderer> renderer = Renderer::Create(device, s_ShadowFrame, s_ShadowFrame, shadowMapSize);
+		REQUIRE(renderer != nullptr);
+		renderer->GetSettings().Ambient = glm::vec3(0.0f);
+		return renderer;
+	}
+
+	// Camera 10 m above the origin looking straight down (screen right = +X, screen down = +Z); a large ground plane;
+	// a sun travelling toward +X and downward, so shadows fall to the right (+X) of their casters.
+	struct ShadowScene
+	{
+		Scene SceneData;
+		Entity Camera, Sun, Ground, Cube;
+
+		explicit ShadowScene(float cubeHeight = 1.0f, float cubeSize = 2.0f)
+		{
+			Camera = SceneData.CreateEntity("Camera");
+			Camera.AddComponent<CameraComponent>();
+			Camera.GetComponent<TransformComponent>().Translation = { 0.0f, 10.0f, 0.0f };
+			Camera.GetComponent<TransformComponent>().Rotation = { -glm::half_pi<float>(), 0.0f, 0.0f };
+
+			Sun = SceneData.CreateEntity("Sun");
+			Sun.AddComponent<DirectionalLightComponent>().Intensity = 3.0f;
+			Sun.GetComponent<TransformComponent>().Rotation = { -glm::quarter_pi<float>(), -glm::half_pi<float>(), 0.0f };
+
+			Ground = SceneData.CreateEntity("Ground");
+			Ground.GetComponent<TransformComponent>().Scale = { 40.0f, 1.0f, 40.0f };
+			auto& ground = Ground.AddComponent<MeshRendererComponent>();
+			ground.Primitive = PrimitiveType::Plane;
+			ground.Material = { { 1.0f, 1.0f, 1.0f, 1.0f }, 0.0f, 1.0f, { 0, 0, 0 } };
+
+			Cube = SceneData.CreateEntity("Cube");
+			Cube.GetComponent<TransformComponent>().Translation = { 0.0f, cubeHeight, 0.0f };
+			Cube.GetComponent<TransformComponent>().Scale = glm::vec3(cubeSize);
+			auto& cube = Cube.AddComponent<MeshRendererComponent>();
+			cube.Primitive = PrimitiveType::Cube;
+			cube.Material = { { 1.0f, 1.0f, 1.0f, 1.0f }, 0.0f, 1.0f, { 0, 0, 0 } }; // same albedo as the ground
+		}
+
+		// Pixel for a ground point (the camera sees 11.5 world units across at ground level over 128 pixels).
+		static glm::ivec2 Pixel(float x, float z) { return { int(64.0f + x * 11.1f), int(64.0f + z * 11.1f) }; }
+	};
+
+	float LuminanceAt(const ImageData& image, const glm::ivec2& p)
+	{
+		REQUIRE(p.x >= 0);
+		REQUIRE(p.y >= 0);
+		REQUIRE(uint32_t(p.x) < image.Width);
+		REQUIRE(uint32_t(p.y) < image.Height);
+		return Luminance(image.PixelAt(uint32_t(p.x), uint32_t(p.y)));
+	}
+
+	// Number of pixels along a row whose brightness lies between the shadow and the lit level (the penumbra).
+	int PenumbraPixels(const ImageData& image, int row, int from, int to, float dark, float lit)
+	{
+		int count = 0;
+		for (int x = from; x < to; x++)
+		{
+			const float l = Luminance(image.PixelAt(uint32_t(x), uint32_t(row)));
+			if (l > dark + 0.2f * (lit - dark) && l < dark + 0.8f * (lit - dark))
+				count++;
+		}
+		return count;
+	}
+
+}
+
+TEST_CASE("Shadows fall on the side away from the light and only there")
+{
+	auto device = GetTestRenderDevice();
+	if (!device)
+		return;
+
+	Ref<Renderer> renderer = MakeShadowRenderer(device);
+	ShadowScene scene;
+	REQUIRE(renderer->Render(scene.SceneData, scene.Camera));
+	ImageData image = renderer->ReadOutput();
+
+	const float lit = LuminanceAt(image, ShadowScene::Pixel(-4.0f, 0.0f));
+	CHECK(lit > 120.0f);
+	CHECK(LuminanceAt(image, ShadowScene::Pixel(2.0f, 0.0f)) < 25.0f);   // in the cube's shadow (x from 1 to 3)
+	CHECK(LuminanceAt(image, ShadowScene::Pixel(2.0f, 0.8f)) < 25.0f);   // the shadow is as wide as the cube (z from -1 to 1)
+	CHECK(LuminanceAt(image, ShadowScene::Pixel(2.0f, 1.6f)) > lit * 0.9f); // just outside that width: lit
+	CHECK(LuminanceAt(image, ShadowScene::Pixel(2.0f, 3.5f)) > lit * 0.9f); // clearly beside it: lit
+	CHECK(LuminanceAt(image, ShadowScene::Pixel(5.0f, 0.0f)) > lit * 0.9f); // beyond the shadow's tip: lit
+	CHECK(LuminanceAt(image, ShadowScene::Pixel(-2.5f, 0.0f)) > lit * 0.9f); // on the light side of the cube: lit
+}
+
+TEST_CASE("Shadow softness widens the penumbra, and softness 0 gives a hard edge")
+{
+	auto device = GetTestRenderDevice();
+	if (!device)
+		return;
+
+	Ref<Renderer> renderer = MakeShadowRenderer(device);
+	ShadowScene scene(3.0f, 2.0f); // a cube floating above the ground so the penumbra has room to grow
+
+	// Counts pixels that are neither fully lit nor fully shadowed over the whole frame. Cube and ground share an albedo,
+	// so everything not on a shadow edge is either as bright as the ground or black.
+	auto transitionPixels = [&](float softness)
+	{
+		renderer->GetSettings().ShadowSoftness = softness;
+		REQUIRE(renderer->Render(scene.SceneData, scene.Camera));
+		ImageData image = renderer->ReadOutput();
+		const float lit = LuminanceAt(image, ShadowScene::Pixel(-4.0f, -4.0f));
+		int count = 0;
+		for (uint32_t y = 0; y < image.Height; y++)
+			for (uint32_t x = 0; x < image.Width; x++)
+			{
+				const float l = Luminance(image.PixelAt(x, y));
+				if (l > 0.15f * lit && l < 0.85f * lit)
+					count++;
+			}
+		return count;
+	};
+
+	const int hard = transitionPixels(0.0f);
+	const int soft = transitionPixels(0.2f);
+	CHECK(soft > hard * 2);
+	CHECK(hard < 400); // a hard shadow only has a thin edge
+}
+
+TEST_CASE("Contact hardening: the shadow edge is sharper where the caster touches the ground")
+{
+	auto device = GetTestRenderDevice();
+	if (!device)
+		return;
+
+	Ref<Renderer> renderer = MakeShadowRenderer(device);
+	renderer->GetSettings().ShadowSoftness = 0.15f;
+
+	// Width (in pixels) of the transition across the shadow's +Z edge, measured along the shadow's center line.
+	// With the sun at 45 degrees the shadow of a cube at height h is centered h units to the right of it.
+	auto edgeWidth = [&](float height)
+	{
+		ShadowScene scene(height, 2.0f);
+		REQUIRE(renderer->Render(scene.SceneData, scene.Camera));
+		ImageData image = renderer->ReadOutput();
+		const float lit = LuminanceAt(image, ShadowScene::Pixel(-4.0f, -4.0f));
+		const int column = ShadowScene::Pixel(height, 0.0f).x;
+		int count = 0;
+		for (int y = ShadowScene::Pixel(0.0f, 0.0f).y; y < int(image.Height); y++)
+		{
+			const float l = Luminance(image.PixelAt(uint32_t(column), uint32_t(y)));
+			if (l > 0.15f * lit && l < 0.85f * lit)
+				count++;
+		}
+		return count;
+	};
+
+	const int touching = edgeWidth(1.0f);   // cube resting on the ground
+	const int floating = edgeWidth(4.0f);   // cube well above it
+	CHECK(floating > touching);
+	CHECK(floating >= touching + 2);
+}
+
+TEST_CASE("Shadows can be turned off globally or per object; translucent objects do not cast")
+{
+	auto device = GetTestRenderDevice();
+	if (!device)
+		return;
+
+	Ref<Renderer> renderer = MakeShadowRenderer(device);
+	const glm::ivec2 shadowPixel = ShadowScene::Pixel(2.0f, 0.0f);
+
+	ShadowScene normal;
+	REQUIRE(renderer->Render(normal.SceneData, normal.Camera));
+	const float shadowed = LuminanceAt(renderer->ReadOutput(), shadowPixel);
+	CHECK(shadowed < 25.0f);
+
+	renderer->GetSettings().EnableShadows = false;
+	REQUIRE(renderer->Render(normal.SceneData, normal.Camera));
+	CHECK(LuminanceAt(renderer->ReadOutput(), shadowPixel) > 120.0f);
+	renderer->GetSettings().EnableShadows = true;
+
+	ShadowScene noCast;
+	noCast.Cube.GetComponent<MeshRendererComponent>().CastShadows = false;
+	REQUIRE(renderer->Render(noCast.SceneData, noCast.Camera));
+	CHECK(LuminanceAt(renderer->ReadOutput(), shadowPixel) > 120.0f);
+
+	ShadowScene glass;
+	glass.Cube.GetComponent<MeshRendererComponent>().Material.BaseColor.a = 0.4f;
+	REQUIRE(renderer->Render(glass.SceneData, glass.Camera));
+	CHECK(LuminanceAt(renderer->ReadOutput(), shadowPixel) > 120.0f);
+
+	ShadowScene noLight;
+	noLight.SceneData.DestroyEntity(noLight.Sun);
+	REQUIRE(renderer->Render(noLight.SceneData, noLight.Camera)); // no light: nothing to shadow, must not crash
+}
+
+TEST_CASE("No shadow acne on surfaces lit at a grazing angle")
+{
+	auto device = GetTestRenderDevice();
+	if (!device)
+		return;
+
+	Ref<Renderer> renderer = MakeShadowRenderer(device);
+	ShadowScene scene(1.0f, 0.5f);
+	scene.Cube.GetComponent<TransformComponent>().Translation = { 30.0f, 0.25f, 30.0f }; // a caster far from the area we inspect
+	scene.Sun.GetComponent<TransformComponent>().Rotation = { -glm::radians(12.0f), -glm::half_pi<float>(), 0.0f }; // 12 degrees above the horizon
+	REQUIRE(renderer->Render(scene.SceneData, scene.Camera));
+	ImageData image = renderer->ReadOutput();
+
+	float minimum = 1e9f, maximum = -1e9f;
+	for (int y = 20; y < 108; y += 4)
+		for (int x = 20; x < 108; x += 4)
+		{
+			const float l = Luminance(image.PixelAt(uint32_t(x), uint32_t(y)));
+			minimum = std::min(minimum, l);
+			maximum = std::max(maximum, l);
+		}
+	CHECK(maximum > 5.0f);               // the ground is actually lit
+	CHECK(maximum - minimum < 6.0f);     // and evenly: no striping or speckle
+}
+
+TEST_CASE("Shadow map size is validated")
+{
+	auto device = GetTestRenderDevice();
+	if (!device)
+		return;
+	CHECK(Renderer::Create(device, 64, 64, 100) == nullptr);
+	CHECK(Renderer::Create(device, 64, 64, 16384) == nullptr);
+	CHECK(Renderer::Create(device, 64, 64, 256) != nullptr);
+}
