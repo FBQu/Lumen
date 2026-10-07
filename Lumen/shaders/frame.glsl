@@ -14,4 +14,7 @@ layout(set = 0, binding = 256) uniform Frame
 	mat4 uLightViewProj;
 	vec4 uShadowParams;  // x 1 if shadows are on, y receiver depth bias, z normal offset (world units), w tan(light angular radius)
 	vec4 uShadowParams2; // x depth range (world units), y ortho width (world units), z texel size in uv
+	vec4 uProjInfo;      // x tan(fovY/2) * aspect, y tan(fovY/2), z near, w far
+	vec4 uAOParams;      // x radius (world units), y intensity, z power, w 1 if ambient occlusion is on
+	vec4 uScreenParams;  // x width, y height, z 1/width, w 1/height
 };

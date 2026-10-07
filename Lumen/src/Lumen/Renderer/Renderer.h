@@ -28,6 +28,10 @@ namespace Lumen {
 			bool EnableShadows = true;         // soft shadows from the first directional light
 			float ShadowDistance = 60.0f;      // shadows are rendered for the camera frustum up to this distance
 			float ShadowSoftness = 0.02f;      // tan of the light's angular radius: larger = softer, 0 = hard-edged (PCF only)
+			bool EnableAmbientOcclusion = true; // screen-space ambient occlusion on the ambient / image-based lighting terms
+			float AORadius = 0.75f;            // world-space reach of the occlusion
+			float AOIntensity = 1.0f;
+			float AOPower = 1.5f;              // contrast curve
 		};
 
 		// Returns nullptr (after logging) if GPU resources cannot be created. `shadowMapSize` is the edge length of the
@@ -55,6 +59,7 @@ namespace Lumen {
 
 		nvrhi::ITexture* GetOutput() const;
 		nvrhi::ITexture* GetHdrTarget() const;
+		nvrhi::ITexture* GetAmbientOcclusion() const; // R8 occlusion of the last render (1 = unoccluded); valid if AO is enabled
 		ImageData ReadOutput();
 	private:
 		Renderer() = default;

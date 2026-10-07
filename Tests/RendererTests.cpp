@@ -1061,3 +1061,266 @@ TEST_CASE("Shadow map size is validated")
 	CHECK(Renderer::Create(device, 64, 64, 16384) == nullptr);
 	CHECK(Renderer::Create(device, 64, 64, 256) != nullptr);
 }
+
+// ---------------------------------------------------------------------------------------------
+// Ambient occlusion
+// ---------------------------------------------------------------------------------------------
+
+namespace {
+
+	// Reads the R8 occlusion buffer (1 = unoccluded) as floats.
+	struct AoImage
+	{
+		ImageData Data;
+		float At(uint32_t x, uint32_t y) const { return static_cast<float>(*Data.PixelAt(x, y)) / 255.0f; }
+	};
+
+	AoImage ReadAo(const Ref<RenderDevice>& device, const Ref<Renderer>& renderer)
+	{
+		return { device->ReadTexture(renderer->GetAmbientOcclusion()) };
+	}
+
+	Ref<Renderer> MakeAoRenderer(const Ref<RenderDevice>& device, uint32_t size = 128)
+	{
+		Ref<Renderer> renderer = Renderer::Create(device, size, size, 256);
+		REQUIRE(renderer != nullptr);
+		renderer->GetSettings().Ambient = glm::vec3(1.0f);
+		renderer->GetSettings().EnableShadows = false;
+		return renderer;
+	}
+
+	// A floor, optionally with a wall standing on it, seen from an oblique camera.
+	struct AoScene
+	{
+		Scene SceneData;
+		Entity Camera, Floor, Wall;
+
+		explicit AoScene(bool withWall)
+		{
+			Camera = SceneData.CreateEntity("Camera");
+			Camera.AddComponent<CameraComponent>();
+			Camera.GetComponent<TransformComponent>().Translation = { 0.0f, 6.0f, 6.0f };
+			Camera.GetComponent<TransformComponent>().Rotation = { -glm::radians(45.0f), 0.0f, 0.0f };
+
+			Floor = SceneData.CreateEntity("Floor");
+			Floor.GetComponent<TransformComponent>().Scale = { 30.0f, 1.0f, 30.0f };
+			Floor.AddComponent<MeshRendererComponent>().Primitive = PrimitiveType::Plane;
+
+			if (withWall)
+			{
+				Wall = SceneData.CreateEntity("Wall"); // a slab 8 wide, 4 tall, 0.2 thick, standing on the floor at z = -1
+				Wall.GetComponent<TransformComponent>().Translation = { 0.0f, 2.0f, -1.0f };
+				Wall.GetComponent<TransformComponent>().Scale = { 8.0f, 4.0f, 0.2f };
+				Wall.AddComponent<MeshRendererComponent>().Primitive = PrimitiveType::Cube;
+			}
+		}
+	};
+
+}
+
+namespace {
+
+	// Row of the darkest pixel in a column (the crease where the wall meets the floor).
+	uint32_t DarkestRow(const AoImage& ao, uint32_t column, uint32_t from, uint32_t to)
+	{
+		uint32_t best = from;
+		for (uint32_t y = from; y < to; y++)
+			if (ao.At(column, y) < ao.At(column, best))
+				best = y;
+		return best;
+	}
+
+	int CountBelow(const AoImage& ao, float threshold)
+	{
+		int count = 0;
+		for (uint32_t y = 0; y < ao.Data.Height; y++)
+			for (uint32_t x = 0; x < ao.Data.Width; x++)
+				if (ao.At(x, y) < threshold)
+					count++;
+		return count;
+	}
+
+}
+
+TEST_CASE("Ambient occlusion leaves open surfaces and isolated convex shapes unoccluded")
+{
+	auto device = GetTestRenderDevice();
+	if (!device)
+		return;
+
+	Ref<Renderer> renderer = MakeAoRenderer(device);
+	AoScene floorOnly(false);
+	REQUIRE(renderer->Render(floorOnly.SceneData, floorOnly.Camera));
+	AoImage ao = ReadAo(device, renderer);
+	for (uint32_t y = 60; y < 126; y += 6)
+		for (uint32_t x = 10; x < 120; x += 10)
+			CHECK(ao.At(x, y) >= 0.97f);
+
+	// A lone sphere floating in the air: no self occlusion, and the empty sky is exactly 1.
+	AoScene air(false);
+	air.SceneData.DestroyEntity(air.Floor);
+	air.Camera.GetComponent<TransformComponent>().Translation = { 0.0f, 0.0f, 5.0f };
+	air.Camera.GetComponent<TransformComponent>().Rotation = { 0.0f, 0.0f, 0.0f };
+	Entity sphere = air.SceneData.CreateEntity("Sphere");
+	sphere.GetComponent<TransformComponent>().Scale = glm::vec3(3.0f);
+	sphere.AddComponent<MeshRendererComponent>().Primitive = PrimitiveType::Sphere;
+	REQUIRE(renderer->Render(air.SceneData, air.Camera));
+	ao = ReadAo(device, renderer);
+	CHECK(ao.At(2, 2) == doctest::Approx(1.0f));
+	for (uint32_t y = 40; y < 90; y += 5)
+		for (uint32_t x = 40; x < 90; x += 5)
+			CHECK(ao.At(x, y) >= 0.96f);
+}
+
+TEST_CASE("Ambient occlusion darkens creases and fades with distance from them")
+{
+	auto device = GetTestRenderDevice();
+	if (!device)
+		return;
+
+	Ref<Renderer> renderer = MakeAoRenderer(device);
+	AoScene scene(true);
+	REQUIRE(renderer->Render(scene.SceneData, scene.Camera));
+	AoImage ao = ReadAo(device, renderer);
+
+	const uint32_t column = 64;
+	const uint32_t crease = DarkestRow(ao, column, 40, 90);
+	CHECK(ao.At(column, crease) < 0.75f);   // clearly occluded in the corner
+
+	// Moving away from the crease across the floor the occlusion fades out (never gets darker), reaching about 1.
+	float previous = ao.At(column, crease + 2);
+	for (uint32_t y = crease + 4; y < crease + 30; y += 2)
+	{
+		const float now = ao.At(column, y);
+		CHECK(now >= previous - 0.04f);
+		previous = now;
+	}
+	CHECK(ao.At(column, crease + 30) >= 0.97f);
+
+	// The upper part of the wall, far from the floor, is open.
+	CHECK(ao.At(column, 20) >= 0.97f);
+}
+
+TEST_CASE("Ambient occlusion grounds objects: contact darkening under a sphere")
+{
+	auto device = GetTestRenderDevice();
+	if (!device)
+		return;
+
+	Ref<Renderer> renderer = MakeAoRenderer(device);
+	AoScene scene(false);
+	Entity ball = scene.SceneData.CreateEntity("Ball");
+	ball.GetComponent<TransformComponent>().Translation = { 0.0f, 0.5f, 0.0f };
+	ball.AddComponent<MeshRendererComponent>().Primitive = PrimitiveType::Sphere; // radius 0.5, resting on the floor
+	REQUIRE(renderer->Render(scene.SceneData, scene.Camera));
+	AoImage ao = ReadAo(device, renderer);
+
+	float darkest = 1.0f;
+	for (uint32_t y = 0; y < ao.Data.Height; y++)
+		for (uint32_t x = 0; x < ao.Data.Width; x++)
+			darkest = std::min(darkest, ao.At(x, y));
+	CHECK(darkest < 0.85f);          // the ring where floor and sphere meet
+	CHECK(ao.At(10, 110) >= 0.97f);  // far floor untouched
+}
+
+TEST_CASE("Ambient occlusion parameters: intensity, radius and the global switch")
+{
+	auto device = GetTestRenderDevice();
+	if (!device)
+		return;
+
+	Ref<Renderer> renderer = MakeAoRenderer(device);
+	AoScene scene(true);
+
+	auto render = [&]
+	{
+		REQUIRE(renderer->Render(scene.SceneData, scene.Camera));
+		return ReadAo(device, renderer);
+	};
+	auto darkestInColumn = [](const AoImage& ao)
+	{
+		float darkest = 1.0f;
+		for (uint32_t y = 40; y < 90; y++)
+			darkest = std::min(darkest, ao.At(64, y));
+		return darkest;
+	};
+
+	const AoImage normal = render();
+	const float baseline = darkestInColumn(normal);
+
+	renderer->GetSettings().AOIntensity = 0.0f;
+	CHECK(darkestInColumn(render()) >= 0.99f); // no intensity, no occlusion
+	renderer->GetSettings().AOIntensity = 2.0f;
+	CHECK(darkestInColumn(render()) < baseline - 0.05f);
+	renderer->GetSettings().AOIntensity = 1.0f;
+
+	renderer->GetSettings().AORadius = 0.2f;
+	const int smallArea = CountBelow(render(), 0.9f);
+	renderer->GetSettings().AORadius = 1.5f;
+	const int largeArea = CountBelow(render(), 0.9f);
+	CHECK(largeArea > smallArea * 2);
+	renderer->GetSettings().AORadius = 0.75f;
+
+	// Switched off: rendering equals the zero-intensity result and the buffer is not needed.
+	REQUIRE(renderer->Render(scene.SceneData, scene.Camera));
+	const ImageData withAo = renderer->ReadOutput();
+	renderer->GetSettings().AOIntensity = 0.0f;
+	REQUIRE(renderer->Render(scene.SceneData, scene.Camera));
+	const ImageData zeroIntensity = renderer->ReadOutput();
+	renderer->GetSettings().AOIntensity = 1.0f;
+	renderer->GetSettings().EnableAmbientOcclusion = false;
+	REQUIRE(renderer->Render(scene.SceneData, scene.Camera));
+	const ImageData disabled = renderer->ReadOutput();
+	CHECK(disabled.Pixels == zeroIntensity.Pixels);
+	CHECK(withAo.Pixels != disabled.Pixels);
+}
+
+TEST_CASE("Ambient occlusion shades the ambient term only where occluded")
+{
+	auto device = GetTestRenderDevice();
+	if (!device)
+		return;
+
+	Ref<Renderer> renderer = MakeAoRenderer(device);
+	AoScene scene(true);
+
+	auto hdr = [&](bool enabled)
+	{
+		renderer->GetSettings().EnableAmbientOcclusion = enabled;
+		REQUIRE(renderer->Render(scene.SceneData, scene.Camera));
+		return device->ReadTexture(renderer->GetHdrTarget());
+	};
+	REQUIRE(renderer->Render(scene.SceneData, scene.Camera));
+	const AoImage ao = ReadAo(device, renderer);
+	const uint32_t crease = DarkestRow(ao, 64, 40, 90);
+
+	const ImageData withAo = hdr(true);
+	const ImageData withoutAo = hdr(false);
+	const float occluded = HdrPixel(withAo, 64, crease).r;
+	const float reference = HdrPixel(withoutAo, 64, crease).r;
+	CHECK(occluded < reference * 0.85f);                                   // darker in the crease
+	CHECK(HdrPixel(withAo, 64, 110).r == doctest::Approx(HdrPixel(withoutAo, 64, 110).r).epsilon(0.01)); // identical on the open floor
+}
+
+TEST_CASE("Ambient occlusion also darkens image-based lighting, including specular occlusion")
+{
+	auto device = GetTestRenderDevice();
+	if (!device)
+		return;
+
+	Ref<Renderer> renderer = MakeAoRenderer(device);
+	REQUIRE(renderer->SetEnvironment(BuildEnvironment(UniformSky(1.0f))));
+	renderer->GetSettings().ShowBackground = false;
+	AoScene scene(true);
+	scene.Floor.GetComponent<MeshRendererComponent>().Material = { { 1.0f, 1.0f, 1.0f, 1.0f }, 0.0f, 0.5f, { 0, 0, 0 } };
+
+	REQUIRE(renderer->Render(scene.SceneData, scene.Camera));
+	const AoImage ao = ReadAo(device, renderer);
+	const uint32_t crease = DarkestRow(ao, 64, 40, 90);
+	const float lit = HdrPixel(device->ReadTexture(renderer->GetHdrTarget()), 64, crease).r;
+
+	renderer->GetSettings().EnableAmbientOcclusion = false;
+	REQUIRE(renderer->Render(scene.SceneData, scene.Camera));
+	const float reference = HdrPixel(device->ReadTexture(renderer->GetHdrTarget()), 64, crease).r;
+	CHECK(lit < reference * 0.9f);
+}

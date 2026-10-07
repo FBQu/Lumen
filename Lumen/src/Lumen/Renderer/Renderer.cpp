@@ -24,6 +24,12 @@ extern const unsigned char g_Shader_mesh_vert[];
 extern const size_t g_Shader_mesh_vert_size;
 extern const unsigned char g_Shader_pbr_frag[];
 extern const size_t g_Shader_pbr_frag_size;
+extern const unsigned char g_Shader_prepass_frag[];
+extern const size_t g_Shader_prepass_frag_size;
+extern const unsigned char g_Shader_ssao_frag[];
+extern const size_t g_Shader_ssao_frag_size;
+extern const unsigned char g_Shader_ssao_blur_frag[];
+extern const size_t g_Shader_ssao_blur_frag_size;
 extern const unsigned char g_Shader_shadow_vert[];
 extern const size_t g_Shader_shadow_vert_size;
 extern const unsigned char g_Shader_sky_frag[];
@@ -52,8 +58,11 @@ namespace Lumen {
 			glm::mat4 LightViewProj;
 			glm::vec4 ShadowParams;  // x shadows on, y receiver depth bias, z normal offset (world units), w tan(light angular radius)
 			glm::vec4 ShadowParams2; // x depth range (world units), y ortho width (world units), z texel size in uv
+			glm::vec4 ProjInfo;      // x tan(fovY/2) * aspect, y tan(fovY/2), z near, w far
+			glm::vec4 AOParams;      // x radius, y intensity, z power, w enabled
+			glm::vec4 ScreenParams;  // x width, y height, z 1/width, w 1/height
 		};
-		static_assert(sizeof(FrameConstants) == 3 * 64 + 4 * 16 + 9 * 16 + 16 + 64 + 2 * 16, "FrameConstants must match frame.glsl (std140)");
+		static_assert(sizeof(FrameConstants) == 3 * 64 + 4 * 16 + 9 * 16 + 16 + 64 + 2 * 16 + 3 * 16, "FrameConstants must match frame.glsl (std140)");
 
 		struct ShadowConstants
 		{
@@ -132,6 +141,15 @@ namespace Lumen {
 		nvrhi::BindingLayoutHandle SceneLayout, MaterialLayout, TonemapLayout;
 		nvrhi::BindingSetHandle SceneBindings, TonemapBindings, DefaultMaterialBindings;
 		nvrhi::GraphicsPipelineHandle SkyPipeline;
+
+		// Ambient occlusion: normal/depth prepass -> horizon-based AO -> separable depth-aware blur.
+		nvrhi::TextureHandle AoDepth, NormalTarget, AoRaw, AoTemp, AoFinal;
+		nvrhi::FramebufferHandle PrepassFramebuffer, AoRawFramebuffer, AoTempFramebuffer, AoFinalFramebuffer;
+		nvrhi::SamplerHandle PointSampler, AoSampler;
+		nvrhi::BindingLayoutHandle PrepassLayout, AoLayout, BlurLayout;
+		nvrhi::BindingSetHandle PrepassBindings, AoBindings, BlurHBindings, BlurVBindings;
+		std::array<nvrhi::GraphicsPipelineHandle, 2> PrepassPipelines; // Opaque, DoubleSided
+		nvrhi::GraphicsPipelineHandle AoPipeline, BlurHPipeline, BlurVPipeline;
 
 		// Shadow mapping.
 		uint32_t ShadowSize = 2048;
@@ -279,9 +297,11 @@ namespace Lumen {
 				.addItem(nvrhi::BindingSetItem::Texture_SRV(1, lut))
 				.addItem(nvrhi::BindingSetItem::Texture_SRV(2, background))
 				.addItem(nvrhi::BindingSetItem::Texture_SRV(3, ShadowMap))
+				.addItem(nvrhi::BindingSetItem::Texture_SRV(4, AoFinal))
 				.addItem(nvrhi::BindingSetItem::Sampler(0, EnvSampler))
 				.addItem(nvrhi::BindingSetItem::Sampler(1, SkySampler))
-				.addItem(nvrhi::BindingSetItem::Sampler(2, ShadowSampler)), SceneLayout);
+				.addItem(nvrhi::BindingSetItem::Sampler(2, ShadowSampler))
+				.addItem(nvrhi::BindingSetItem::Sampler(3, AoSampler)), SceneLayout);
 		}
 
 		bool SetEnvironmentImpl(Ref<const Environment> environment)
@@ -411,9 +431,11 @@ namespace Lumen {
 				.addItem(nvrhi::BindingLayoutItem::Texture_SRV(1)) // BRDF LUT
 				.addItem(nvrhi::BindingLayoutItem::Texture_SRV(2)) // background
 				.addItem(nvrhi::BindingLayoutItem::Texture_SRV(3)) // shadow map
+				.addItem(nvrhi::BindingLayoutItem::Texture_SRV(4)) // ambient occlusion
 				.addItem(nvrhi::BindingLayoutItem::Sampler(0))
 				.addItem(nvrhi::BindingLayoutItem::Sampler(1))
-				.addItem(nvrhi::BindingLayoutItem::Sampler(2)));
+				.addItem(nvrhi::BindingLayoutItem::Sampler(2))
+				.addItem(nvrhi::BindingLayoutItem::Sampler(3)));
 
 			// Shadow map and its depth-only pass.
 			nvrhi::TextureDesc shadowDesc;
@@ -430,6 +452,30 @@ namespace Lumen {
 			if (!ShadowMap || !ShadowSampler)
 				return false;
 			ShadowFramebuffer = gpu->createFramebuffer(nvrhi::FramebufferDesc().setDepthAttachment(ShadowMap));
+
+			// Ambient occlusion targets and passes.
+			nvrhi::TextureDesc aoDepthDesc;
+			aoDepthDesc.width = Width;
+			aoDepthDesc.height = Height;
+			aoDepthDesc.format = nvrhi::Format::D32;
+			aoDepthDesc.isRenderTarget = true;
+			aoDepthDesc.isShaderResource = true;
+			aoDepthDesc.initialState = nvrhi::ResourceStates::ShaderResource;
+			aoDepthDesc.keepInitialState = true;
+			aoDepthDesc.debugName = "AoDepth";
+			AoDepth = gpu->createTexture(aoDepthDesc);
+			NormalTarget = Device->CreateRenderTarget(Width, Height, nvrhi::Format::RGBA16_FLOAT, "AoNormals");
+			AoRaw = Device->CreateRenderTarget(Width, Height, nvrhi::Format::R8_UNORM, "AoRaw");
+			AoTemp = Device->CreateRenderTarget(Width, Height, nvrhi::Format::R8_UNORM, "AoTemp");
+			AoFinal = Device->CreateRenderTarget(Width, Height, nvrhi::Format::R8_UNORM, "AoFinal");
+			PointSampler = gpu->createSampler(nvrhi::SamplerDesc().setAllFilters(false).setAllAddressModes(nvrhi::SamplerAddressMode::Clamp));
+			AoSampler = gpu->createSampler(nvrhi::SamplerDesc().setAllFilters(true).setAllAddressModes(nvrhi::SamplerAddressMode::Clamp));
+			if (!AoDepth || !NormalTarget || !AoRaw || !AoTemp || !AoFinal || !PointSampler || !AoSampler)
+				return false;
+			PrepassFramebuffer = gpu->createFramebuffer(nvrhi::FramebufferDesc().addColorAttachment(NormalTarget).setDepthAttachment(AoDepth));
+			AoRawFramebuffer = gpu->createFramebuffer(nvrhi::FramebufferDesc().addColorAttachment(AoRaw));
+			AoTempFramebuffer = gpu->createFramebuffer(nvrhi::FramebufferDesc().addColorAttachment(AoTemp));
+			AoFinalFramebuffer = gpu->createFramebuffer(nvrhi::FramebufferDesc().addColorAttachment(AoFinal));
 
 			// Dummies keep the environment bindings valid while no environment is set.
 			DummyCube = CreateHalfTexture(1, 1, 6, 1, nvrhi::Format::RGBA16_FLOAT, "DummyCube");
@@ -547,6 +593,89 @@ namespace Lumen {
 			if (!ShadowPipeline)
 				return false;
 
+			// --- Ambient occlusion pipelines ---------------------------------------------------------------------------
+			nvrhi::ShaderHandle prepassPs = CreateShader(gpu, nvrhi::ShaderType::Pixel, "prepass.frag", g_Shader_prepass_frag, g_Shader_prepass_frag_size);
+			nvrhi::ShaderHandle ssaoPs = CreateShader(gpu, nvrhi::ShaderType::Pixel, "ssao.frag", g_Shader_ssao_frag, g_Shader_ssao_frag_size);
+			nvrhi::ShaderHandle blurPs = CreateShader(gpu, nvrhi::ShaderType::Pixel, "ssao_blur.frag", g_Shader_ssao_blur_frag, g_Shader_ssao_blur_frag_size);
+			if (!prepassPs || !ssaoPs || !blurPs)
+				return false;
+
+			PrepassLayout = gpu->createBindingLayout(nvrhi::BindingLayoutDesc()
+				.setVisibility(nvrhi::ShaderType::All)
+				.addItem(nvrhi::BindingLayoutItem::VolatileConstantBuffer(0))
+				.addItem(nvrhi::BindingLayoutItem::PushConstants(1, sizeof(DrawConstants))));
+			PrepassBindings = gpu->createBindingSet(nvrhi::BindingSetDesc()
+				.addItem(nvrhi::BindingSetItem::ConstantBuffer(0, FrameBuffer))
+				.addItem(nvrhi::BindingSetItem::PushConstants(1, sizeof(DrawConstants))), PrepassLayout);
+
+			AoLayout = gpu->createBindingLayout(nvrhi::BindingLayoutDesc()
+				.setVisibility(nvrhi::ShaderType::All)
+				.addItem(nvrhi::BindingLayoutItem::VolatileConstantBuffer(0))
+				.addItem(nvrhi::BindingLayoutItem::Texture_SRV(0))
+				.addItem(nvrhi::BindingLayoutItem::Texture_SRV(1))
+				.addItem(nvrhi::BindingLayoutItem::Sampler(0)));
+			AoBindings = gpu->createBindingSet(nvrhi::BindingSetDesc()
+				.addItem(nvrhi::BindingSetItem::ConstantBuffer(0, FrameBuffer))
+				.addItem(nvrhi::BindingSetItem::Texture_SRV(0, AoDepth))
+				.addItem(nvrhi::BindingSetItem::Texture_SRV(1, NormalTarget))
+				.addItem(nvrhi::BindingSetItem::Sampler(0, PointSampler)), AoLayout);
+
+			BlurLayout = gpu->createBindingLayout(nvrhi::BindingLayoutDesc()
+				.setVisibility(nvrhi::ShaderType::All)
+				.addItem(nvrhi::BindingLayoutItem::VolatileConstantBuffer(0))
+				.addItem(nvrhi::BindingLayoutItem::Texture_SRV(0))
+				.addItem(nvrhi::BindingLayoutItem::Texture_SRV(1))
+				.addItem(nvrhi::BindingLayoutItem::Sampler(0))
+				.addItem(nvrhi::BindingLayoutItem::PushConstants(1, sizeof(glm::vec2))));
+			BlurHBindings = gpu->createBindingSet(nvrhi::BindingSetDesc()
+				.addItem(nvrhi::BindingSetItem::ConstantBuffer(0, FrameBuffer))
+				.addItem(nvrhi::BindingSetItem::Texture_SRV(0, AoRaw))
+				.addItem(nvrhi::BindingSetItem::Texture_SRV(1, AoDepth))
+				.addItem(nvrhi::BindingSetItem::Sampler(0, PointSampler))
+				.addItem(nvrhi::BindingSetItem::PushConstants(1, sizeof(glm::vec2))), BlurLayout);
+			BlurVBindings = gpu->createBindingSet(nvrhi::BindingSetDesc()
+				.addItem(nvrhi::BindingSetItem::ConstantBuffer(0, FrameBuffer))
+				.addItem(nvrhi::BindingSetItem::Texture_SRV(0, AoTemp))
+				.addItem(nvrhi::BindingSetItem::Texture_SRV(1, AoDepth))
+				.addItem(nvrhi::BindingSetItem::Sampler(0, PointSampler))
+				.addItem(nvrhi::BindingSetItem::PushConstants(1, sizeof(glm::vec2))), BlurLayout);
+
+			for (PipelineKind kind : { PipelineKind::Opaque, PipelineKind::DoubleSided })
+			{
+				nvrhi::GraphicsPipelineDesc desc;
+				desc.setPrimType(nvrhi::PrimitiveType::TriangleList)
+					.setInputLayout(InputLayout)
+					.setVertexShader(meshVs)
+					.setPixelShader(prepassPs)
+					.addBindingLayout(PrepassLayout);
+				desc.renderState.depthStencilState.depthTestEnable = true;
+				desc.renderState.depthStencilState.depthWriteEnable = true;
+				desc.renderState.depthStencilState.depthFunc = nvrhi::ComparisonFunc::Less;
+				desc.renderState.rasterState.cullMode = kind == PipelineKind::Opaque ? nvrhi::RasterCullMode::Back : nvrhi::RasterCullMode::None;
+				desc.renderState.rasterState.frontCounterClockwise = true;
+				PrepassPipelines[static_cast<size_t>(kind)] = gpu->createGraphicsPipeline(desc, PrepassFramebuffer->getFramebufferInfo());
+				if (!PrepassPipelines[static_cast<size_t>(kind)])
+					return false;
+			}
+
+			auto makeFullscreenPipeline = [&](nvrhi::IShader* pixelShader, nvrhi::IBindingLayout* layout, nvrhi::IFramebuffer* framebuffer)
+			{
+				nvrhi::GraphicsPipelineDesc desc;
+				desc.setPrimType(nvrhi::PrimitiveType::TriangleList)
+					.setVertexShader(fullscreenVs)
+					.setPixelShader(pixelShader)
+					.addBindingLayout(layout);
+				desc.renderState.depthStencilState.depthTestEnable = false;
+				desc.renderState.depthStencilState.depthWriteEnable = false;
+				desc.renderState.rasterState.cullMode = nvrhi::RasterCullMode::None;
+				return gpu->createGraphicsPipeline(desc, framebuffer->getFramebufferInfo());
+			};
+			AoPipeline = makeFullscreenPipeline(ssaoPs, AoLayout, AoRawFramebuffer);
+			BlurHPipeline = makeFullscreenPipeline(blurPs, BlurLayout, AoTempFramebuffer);
+			BlurVPipeline = makeFullscreenPipeline(blurPs, BlurLayout, AoFinalFramebuffer);
+			if (!AoPipeline || !BlurHPipeline || !BlurVPipeline)
+				return false;
+
 			PrimitiveMeshes[static_cast<size_t>(PrimitiveType::Cube)] = UploadMesh(MeshGenerator::CreateCube(), "Cube");
 			PrimitiveMeshes[static_cast<size_t>(PrimitiveType::Sphere)] = UploadMesh(MeshGenerator::CreateSphere(48, 24), "Sphere");
 			PrimitiveMeshes[static_cast<size_t>(PrimitiveType::Plane)] = UploadMesh(MeshGenerator::CreatePlane(), "Plane");
@@ -629,6 +758,7 @@ namespace Lumen {
 	uint32_t Renderer::GetHeight() const { return m_Impl->Height; }
 	nvrhi::ITexture* Renderer::GetOutput() const { return m_Impl->Output; }
 	nvrhi::ITexture* Renderer::GetHdrTarget() const { return m_Impl->Hdr; }
+	nvrhi::ITexture* Renderer::GetAmbientOcclusion() const { return m_Impl->AoFinal; }
 	ImageData Renderer::ReadOutput() { return m_Impl->Device->ReadTexture(m_Impl->Output); }
 
 	bool Renderer::Render(Scene& scene, Entity camera, const AssetManager* assets)
@@ -749,6 +879,16 @@ namespace Lumen {
 		frame.ShadowParams = glm::vec4(shadowsActive ? 1.0f : 0.0f, 0.0005f, 1.5f * cascade.TexelWorldSize, std::max(impl.RenderSettings.ShadowSoftness, 0.0f));
 		frame.ShadowParams2 = glm::vec4(cascade.DepthRange, 2.0f * cascade.Radius, 1.0f / static_cast<float>(impl.ShadowSize), 0.0f);
 
+		// --- Ambient occlusion parameters ------------------------------------------------------------------------------
+		const float tanHalfFov = std::tan(cameraData.FovY * 0.5f);
+		const float aspectRatio = static_cast<float>(impl.Width) / static_cast<float>(impl.Height);
+		const bool aoActive = impl.RenderSettings.EnableAmbientOcclusion
+			&& std::any_of(draws.begin(), draws.end(), [](const DrawItem& d) { return d.Kind != PipelineKind::Blend; });
+		frame.ProjInfo = glm::vec4(tanHalfFov * aspectRatio, tanHalfFov, cameraData.Near, cameraData.Far);
+		frame.AOParams = glm::vec4(std::max(impl.RenderSettings.AORadius, 0.01f), std::max(impl.RenderSettings.AOIntensity, 0.0f),
+		                           std::max(impl.RenderSettings.AOPower, 0.01f), aoActive ? 1.0f : 0.0f);
+		frame.ScreenParams = glm::vec4(static_cast<float>(impl.Width), static_cast<float>(impl.Height), 1.0f / static_cast<float>(impl.Width), 1.0f / static_cast<float>(impl.Height));
+
 		// --- Record ----------------------------------------------------------------------------------------------------
 		impl.Device->ExecuteImmediate([&](nvrhi::ICommandList* commandList)
 		{
@@ -780,6 +920,50 @@ namespace Lumen {
 					shadowArgs.vertexCount = item.Mesh->IndexCount;
 					commandList->drawIndexed(shadowArgs);
 				}
+			}
+
+			if (aoActive)
+			{
+				const nvrhi::Viewport screen(static_cast<float>(impl.Width), static_cast<float>(impl.Height));
+				commandList->clearTextureFloat(impl.NormalTarget, nvrhi::AllSubresources, nvrhi::Color(0.0f, 0.0f, 1.0f, 0.0f));
+				commandList->clearDepthStencilTexture(impl.AoDepth, nvrhi::AllSubresources, true, 1.0f, false, 0);
+
+				for (const DrawItem& item : draws)
+				{
+					if (item.Kind == PipelineKind::Blend)
+						continue;
+					nvrhi::GraphicsState prepassState;
+					prepassState.setPipeline(impl.PrepassPipelines[static_cast<size_t>(item.Kind)])
+						.setFramebuffer(impl.PrepassFramebuffer)
+						.setViewport(nvrhi::ViewportState().addViewportAndScissorRect(screen))
+						.addBindingSet(impl.PrepassBindings);
+					prepassState.vertexBuffers = { { item.Mesh->VertexBuffer, 0, 0 } };
+					prepassState.indexBuffer = { item.Mesh->IndexBuffer, nvrhi::Format::R32_UINT, 0 };
+					commandList->setGraphicsState(prepassState);
+					commandList->setPushConstants(&item.Constants, sizeof(item.Constants));
+					nvrhi::DrawArguments prepassArgs;
+					prepassArgs.vertexCount = item.Mesh->IndexCount;
+					commandList->drawIndexed(prepassArgs);
+				}
+
+				auto fullscreenPass = [&](nvrhi::IGraphicsPipeline* pipeline, nvrhi::IFramebuffer* framebuffer, nvrhi::IBindingSet* bindings, const glm::vec2* pushConstants)
+				{
+					nvrhi::GraphicsState state;
+					state.setPipeline(pipeline).setFramebuffer(framebuffer)
+						.setViewport(nvrhi::ViewportState().addViewportAndScissorRect(screen))
+						.addBindingSet(bindings);
+					commandList->setGraphicsState(state);
+					if (pushConstants != nullptr)
+						commandList->setPushConstants(pushConstants, sizeof(glm::vec2));
+					nvrhi::DrawArguments args;
+					args.vertexCount = 3;
+					commandList->draw(args);
+				};
+				const glm::vec2 horizontal(1.0f / static_cast<float>(impl.Width), 0.0f);
+				const glm::vec2 vertical(0.0f, 1.0f / static_cast<float>(impl.Height));
+				fullscreenPass(impl.AoPipeline, impl.AoRawFramebuffer, impl.AoBindings, nullptr);
+				fullscreenPass(impl.BlurHPipeline, impl.AoTempFramebuffer, impl.BlurHBindings, &horizontal);
+				fullscreenPass(impl.BlurVPipeline, impl.AoFinalFramebuffer, impl.BlurVBindings, &vertical);
 			}
 
 			const nvrhi::Viewport viewport(static_cast<float>(impl.Width), static_cast<float>(impl.Height));

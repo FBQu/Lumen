@@ -1,6 +1,6 @@
 include(${PROJECT_SOURCE_DIR}/cmake/Shaders.cmake)
 lumen_embed_shaders(LUMEN_SHADER_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/shaders
-    mesh.vert pbr.frag sky.frag shadow.vert fullscreen.vert tonemap.frag)
+    mesh.vert pbr.frag prepass.frag ssao.frag ssao_blur.frag sky.frag shadow.vert fullscreen.vert tonemap.frag)
 
 add_library(LumenCore STATIC
     src/Lumen/Agent/AgentSession.cpp

@@ -17,6 +17,10 @@ layout(set = 0, binding = 128) uniform sampler uEnvSampler;
 layout(set = 0, binding = 3) uniform texture2D uShadowMap;
 layout(set = 0, binding = 130) uniform sampler uShadowSampler;
 
+// Screen-space ambient occlusion (single channel) and a linear clamp sampler.
+layout(set = 0, binding = 4) uniform texture2D uAmbientOcclusion;
+layout(set = 0, binding = 131) uniform sampler uAoSampler;
+
 layout(push_constant) uniform Draw
 {
 	mat4 uModel;
@@ -197,15 +201,23 @@ void main()
 		vec3 Fms = FssEss * Favg / (1.0 - Ems * Favg);
 		vec3 specularWeight = FssEss + Fms * Ems; // total specular reflectance including multiple scattering
 		vec3 kD = (1.0 - metallic) * albedo * (1.0 - specularWeight);
-		vec3 diffuseIbl = kD * EvalSH(N);
+		float ao = 1.0;
+		if (uAOParams.w > 0.5)
+			ao = textureLod(sampler2D(uAmbientOcclusion, uAoSampler), gl_FragCoord.xy * uScreenParams.zw, 0.0).r;
+		// Specular occlusion (Lagarde 2014): occlusion matters less for rough, head-on reflections.
+		float specularOcclusion = clamp(pow(NoV + ao, exp2(-16.0 * roughness - 1.0)) - 1.0 + ao, 0.0, 1.0);
+		vec3 diffuseIbl = kD * EvalSH(N) * ao;
 		vec3 R = reflect(-V, N);
 		vec3 prefiltered = textureLod(samplerCube(uEnvSpecular, uEnvSampler), R, roughness * uEnvParams.y).rgb;
-		vec3 specularIbl = prefiltered * specularWeight;
+		vec3 specularIbl = prefiltered * specularWeight * specularOcclusion;
 		color += (diffuseIbl + specularIbl) * uEnvParams.x * occlusion;
 	}
 	else
 	{
-		color += uAmbient.rgb * albedo * (1.0 - metallic) * occlusion;
+		float ao = 1.0;
+		if (uAOParams.w > 0.5)
+			ao = textureLod(sampler2D(uAmbientOcclusion, uAoSampler), gl_FragCoord.xy * uScreenParams.zw, 0.0).r;
+		color += uAmbient.rgb * albedo * (1.0 - metallic) * occlusion * ao;
 	}
 	color += uEmissive.rgb * texture(sampler2D(uEmissiveTex, uSampler), vUV).rgb;
 
