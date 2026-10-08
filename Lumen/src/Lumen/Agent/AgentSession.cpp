@@ -1,8 +1,12 @@
 #include "Lumen/Agent/AgentSession.h"
 
 #include "Lumen/Assets/AssetManager.h"
+#include "Lumen/Assets/ImageIO.h"
+#include "Lumen/Core/Base64.h"
 #include "Lumen/Core/Log.h"
 #include "Lumen/Physics/PhysicsWorld.h"
+#include "Lumen/Renderer/Environment.h"
+#include "Lumen/Renderer/Renderer.h"
 #include "Lumen/Scene/Entity.h"
 #include "Lumen/Scene/Scene.h"
 #include "Lumen/Scene/SceneSerializer.h"
@@ -15,6 +19,8 @@
 
 #include <charconv>
 #include <deque>
+#include <fstream>
+#include <iterator>
 #include <functional>
 #include <map>
 #include <mutex>
@@ -83,10 +89,17 @@ namespace Lumen {
 	{
 		static inline Impl* s_Active = nullptr;
 
+		// Declared first so the GPU objects below are destroyed after everything that might reference them.
+		Ref<RenderDevice> GpuDevice;
 		Scene SceneData;
 		AssetManager Assets;
 		PhysicsWorld Physics;
 		ScriptEngine Scripts;
+
+		// Rendering (created on first use).
+		Ref<Renderer> Gfx;
+		Renderer::Settings GfxSettings;
+		Ref<const Environment> Env;
 
 		bool Playing = false;
 		uint64_t Frame = 0;
@@ -106,6 +119,74 @@ namespace Lumen {
 			s_Active->LogLines.emplace_back(level, std::string(message));
 			if (s_Active->LogLines.size() > s_MaxLogLines)
 				s_Active->LogLines.pop_front();
+		}
+
+		// Ensures a renderer of the given size exists. Throws CommandError if no GPU is available.
+		Renderer& EnsureRenderer(uint32_t width, uint32_t height)
+		{
+			if (!GpuDevice)
+			{
+				GpuDevice = RenderDevice::Create({});
+				if (!GpuDevice)
+					throw CommandError("no Vulkan device is available for rendering");
+			}
+			if (!Gfx || Gfx->GetWidth() != width || Gfx->GetHeight() != height)
+			{
+				Gfx = Renderer::Create(GpuDevice, width, height, 2048);
+				if (!Gfx)
+					throw CommandError("could not create the renderer");
+				if (Env && !Gfx->SetEnvironment(Env))
+					throw CommandError("could not upload the environment");
+			}
+			Gfx->GetSettings() = GfxSettings;
+			return *Gfx;
+		}
+
+		static Json SettingsToJson(const Renderer::Settings& s)
+		{
+			return Json{ { "exposure", s.Exposure }, { "ambient", { s.Ambient.r, s.Ambient.g, s.Ambient.b } },
+			             { "clearColor", { s.ClearColor.r, s.ClearColor.g, s.ClearColor.b } },
+			             { "environmentIntensity", s.EnvironmentIntensity }, { "showBackground", s.ShowBackground },
+			             { "enableShadows", s.EnableShadows }, { "shadowDistance", s.ShadowDistance }, { "shadowSoftness", s.ShadowSoftness },
+			             { "enableAmbientOcclusion", s.EnableAmbientOcclusion }, { "aoRadius", s.AORadius },
+			             { "aoIntensity", s.AOIntensity }, { "aoPower", s.AOPower } };
+		}
+
+		static void ApplyNumber(const Json& args, const char* key, float& target, float minimum, float maximum)
+		{
+			auto it = args.find(key);
+			if (it == args.end())
+				return;
+			if (!it->is_number())
+				throw CommandError(std::string("'") + key + "' must be a number");
+			const float value = it->get<float>();
+			if (!(value >= minimum && value <= maximum))
+				throw CommandError(std::string("'") + key + "' must be between " + std::to_string(minimum) + " and " + std::to_string(maximum));
+			target = value;
+		}
+
+		static void ApplyBool(const Json& args, const char* key, bool& target)
+		{
+			auto it = args.find(key);
+			if (it == args.end())
+				return;
+			if (!it->is_boolean())
+				throw CommandError(std::string("'") + key + "' must be a boolean");
+			target = it->get<bool>();
+		}
+
+		Entity FindRenderCamera(const Json& args)
+		{
+			if (auto it = args.find("camera"); it != args.end())
+			{
+				Entity entity = SceneData.FindEntityByUUID(ParseUUID(*it, "camera"));
+				if (!entity.IsValid() || !entity.HasComponent<CameraComponent>())
+					throw CommandError("'camera' must be the id of an entity with a camera component");
+				return entity;
+			}
+			for (auto [handle, camera] : SceneData.GetRegistry().view<CameraComponent>().each())
+				return Entity(handle, &SceneData);
+			throw CommandError("the scene has no camera; create an entity with a 'camera' component");
 		}
 
 		Entity RequireEntity(const Json& args)
@@ -285,6 +366,108 @@ namespace Lumen {
 				for (Entity entity : Assets.Instantiate(SceneData, model, transform))
 					created.push_back({ { "id", IDString(entity.GetUUID()) }, { "name", entity.GetName() } });
 				return Json{ { "entities", created } };
+			};
+
+			Commands["render.set"] = [this](const Json& args)
+			{
+				Renderer::Settings updated = GfxSettings;
+				ApplyNumber(args, "exposure", updated.Exposure, 0.0f, 1000.0f);
+				ApplyNumber(args, "environmentIntensity", updated.EnvironmentIntensity, 0.0f, 1000.0f);
+				ApplyNumber(args, "shadowDistance", updated.ShadowDistance, 1.0f, 100000.0f);
+				ApplyNumber(args, "shadowSoftness", updated.ShadowSoftness, 0.0f, 1.0f);
+				ApplyNumber(args, "aoRadius", updated.AORadius, 0.01f, 1000.0f);
+				ApplyNumber(args, "aoIntensity", updated.AOIntensity, 0.0f, 10.0f);
+				ApplyNumber(args, "aoPower", updated.AOPower, 0.01f, 10.0f);
+				ApplyBool(args, "showBackground", updated.ShowBackground);
+				ApplyBool(args, "enableShadows", updated.EnableShadows);
+				ApplyBool(args, "enableAmbientOcclusion", updated.EnableAmbientOcclusion);
+				if (args.contains("ambient")) updated.Ambient = ParseVec3(args["ambient"], "ambient");
+				if (args.contains("clearColor")) updated.ClearColor = ParseVec3(args["clearColor"], "clearColor");
+				GfxSettings = updated; // only commit once everything validated
+				return SettingsToJson(GfxSettings);
+			};
+
+			Commands["render.set_environment"] = [this](const Json& args)
+			{
+				const Json& source = Require(args, "source");
+				if (!source.is_string())
+					throw CommandError("'source' must be a string: \"sky\", \"none\" or the path of a .hdr file");
+				const std::string name = source.get<std::string>();
+
+				Ref<const Environment> environment;
+				if (name != "none")
+				{
+					ImageIO::HdrImage image;
+					if (name == "sky")
+					{
+						image = EnvironmentBuilder::MakeProceduralSky();
+					}
+					else
+					{
+						std::ifstream file(name, std::ios::binary);
+						if (!file)
+							throw CommandError("could not read '" + name + "'");
+						const std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(file)), {});
+						std::string error;
+						auto decoded = ImageIO::DecodeHDR(bytes.data(), bytes.size(), &error);
+						if (!decoded)
+							throw CommandError("could not decode '" + name + "': " + error);
+						image = std::move(*decoded);
+					}
+					std::string error;
+					auto built = EnvironmentBuilder::FromEquirect(image, {}, &error);
+					if (!built)
+						throw CommandError("invalid environment: " + error);
+					environment = CreateRef<const Environment>(std::move(*built));
+				}
+
+				if (Gfx && !Gfx->SetEnvironment(environment))
+					throw CommandError("could not upload the environment");
+				Env = environment;
+				if (args.contains("intensity") || args.contains("showBackground"))
+				{
+					ApplyNumber(args, "intensity", GfxSettings.EnvironmentIntensity, 0.0f, 1000.0f);
+					ApplyBool(args, "showBackground", GfxSettings.ShowBackground);
+				}
+				return Json{ { "environment", name } };
+			};
+
+			Commands["render.screenshot"] = [this](const Json& args)
+			{
+				uint32_t width = 1280, height = 720;
+				for (auto [key, target] : { std::pair<const char*, uint32_t*>{ "width", &width }, { "height", &height } })
+				{
+					if (auto it = args.find(key); it != args.end())
+					{
+						if (!it->is_number_integer() || it->get<int>() < 64 || it->get<int>() > 4096)
+							throw CommandError(std::string("'") + key + "' must be an integer between 64 and 4096");
+						*target = static_cast<uint32_t>(it->get<int>());
+					}
+				}
+				const bool inlineImage = args.value("inline", false);
+				const bool hasPath = args.contains("path");
+				if (hasPath && !args["path"].is_string())
+					throw CommandError("'path' must be a string");
+				if (!hasPath && !inlineImage)
+					throw CommandError("give a 'path' to write the PNG to, or set 'inline' to true to receive it as base64");
+
+				Entity camera = FindRenderCamera(args);
+				Renderer& renderer = EnsureRenderer(width, height);
+				if (!renderer.Render(SceneData, camera, &Assets))
+					throw CommandError("rendering failed");
+
+				ImageData image = renderer.ReadOutput();
+				Json result = { { "width", width }, { "height", height }, { "device", GpuDevice->GetDeviceName() } };
+				if (hasPath)
+				{
+					std::string error;
+					if (!ImageIO::WritePNG(args["path"].get<std::string>(), image, &error))
+						throw CommandError(error);
+					result["path"] = args["path"];
+				}
+				if (inlineImage)
+					result["png_base64"] = Base64::Encode(ImageIO::EncodePNG(image));
+				return result;
 			};
 
 			Commands["play.start"] = [this](const Json&)

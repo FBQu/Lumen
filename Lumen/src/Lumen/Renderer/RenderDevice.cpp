@@ -14,6 +14,7 @@ VULKAN_HPP_DEFAULT_DISPATCH_LOADER_DYNAMIC_STORAGE
 
 #include <algorithm>
 #include <cstring>
+#include <mutex>
 
 namespace Lumen {
 
@@ -74,6 +75,18 @@ namespace Lumen {
 	};
 
 	Ref<RenderDevice> RenderDevice::Create(const Desc& desc)
+	{
+		static std::mutex s_Mutex;
+		static std::weak_ptr<RenderDevice> s_Instance;
+		std::lock_guard lock(s_Mutex);
+		if (Ref<RenderDevice> existing = s_Instance.lock())
+			return existing;
+		Ref<RenderDevice> created = CreateNew(desc);
+		s_Instance = created;
+		return created;
+	}
+
+	Ref<RenderDevice> RenderDevice::CreateNew(const Desc& desc)
 	{
 		if (volkInitialize() != VK_SUCCESS)
 		{

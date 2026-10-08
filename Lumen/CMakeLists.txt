@@ -7,6 +7,7 @@ add_library(LumenCore STATIC
     src/Lumen/Assets/AssetManager.cpp
     src/Lumen/Assets/GltfImporter.cpp
     src/Lumen/Assets/ImageIO.cpp
+    src/Lumen/Core/Base64.cpp
     src/Lumen/Core/Log.cpp
     src/Lumen/Core/UUID.cpp
     src/Lumen/Physics/PhysicsWorld.cpp

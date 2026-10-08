@@ -31,7 +31,9 @@ namespace Lumen {
 			bool EnableValidation = false;
 		};
 
-		// Returns nullptr (after logging why) if no usable Vulkan device exists.
+		// Returns nullptr (after logging why) if no usable Vulkan device exists. Vulkan-Hpp's dispatcher is process-global, so
+		// only one device exists at a time: while a previously created device is still alive, Create returns that same
+		// device (and `desc` is ignored).
 		static Ref<RenderDevice> Create(const Desc& desc);
 		~RenderDevice();
 		RenderDevice(const RenderDevice&) = delete;
@@ -58,6 +60,7 @@ namespace Lumen {
 		}
 	private:
 		RenderDevice() = default;
+		static Ref<RenderDevice> CreateNew(const Desc& desc);
 
 		struct Vulkan;
 		Scope<Vulkan> m_Vulkan;

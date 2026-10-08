@@ -248,6 +248,8 @@ TEST_CASE("Destroying a session while playing is safe")
 
 #include <filesystem>
 #include <fstream>
+#include <iterator>
+#include <glm/glm.hpp>
 
 TEST_CASE("Agent: import a glTF, instantiate it, and the references survive play and scene round trips")
 {
@@ -322,4 +324,177 @@ TEST_CASE("Agent: render components can be created and patched through JSON")
 
 	CHECK_FALSE(Ok(session, "entity.set", { { "id", id }, { "camera", nullptr } }).contains("camera"));
 	CHECK(Contains(ErrorOf(session, "entity.set", { { "id", id }, { "camera", { { "fovDegrees", 500 } } } }), "between 1 and 179"));
+}
+
+// ---------------------------------------------------------------------------------------------
+// Rendering commands
+// ---------------------------------------------------------------------------------------------
+
+#include "RenderTestUtil.h"
+#include "Lumen/Assets/ImageIO.h"
+#include "Lumen/Core/Base64.h"
+
+namespace {
+
+	void BuildRenderableScene(AgentSession& session)
+	{
+		Ok(session, "entity.create", { { "name", "Camera" }, { "camera", Json::object() }, { "transform", { { "translation", { 0, 0, 3 } } } } });
+		Ok(session, "entity.create", { { "name", "Sun" }, { "directionalLight", { { "intensity", 3 } } } });
+		Ok(session, "entity.create", { { "name", "Ball" }, { "meshRenderer", { { "primitive", "sphere" }, { "material", { { "roughness", 0.8 } } } } } });
+	}
+
+	float CenterLuminance(const ImageData& image)
+	{
+		const uint8_t* p = image.PixelAt(image.Width / 2, image.Height / 2);
+		return 0.2126f * p[0] + 0.7152f * p[1] + 0.0722f * p[2];
+	}
+
+	ImageData DecodeInline(const Json& result)
+	{
+		auto bytes = Base64::Decode(result["png_base64"].get<std::string>());
+		REQUIRE(bytes.has_value());
+		auto image = ImageIO::DecodeLDR(bytes->data(), bytes->size());
+		REQUIRE(image.has_value());
+		return *image;
+	}
+
+}
+
+TEST_CASE("Agent: render.screenshot validates its input before touching the GPU")
+{
+	AgentSession session;
+	CHECK(Contains(ErrorOf(session, "render.screenshot", { { "path", "x.png" } }), "no camera"));
+
+	Ok(session, "entity.create", { { "name", "Camera" }, { "camera", Json::object() } });
+	CHECK(Contains(ErrorOf(session, "render.screenshot"), "'path'"));
+	CHECK(Contains(ErrorOf(session, "render.screenshot", { { "path", 5 } }), "'path' must be a string"));
+	CHECK(Contains(ErrorOf(session, "render.screenshot", { { "path", "x.png" }, { "width", 10 } }), "'width'"));
+	CHECK(Contains(ErrorOf(session, "render.screenshot", { { "path", "x.png" }, { "height", 100000 } }), "'height'"));
+	CHECK(Contains(ErrorOf(session, "render.screenshot", { { "path", "x.png" }, { "width", 128.5 } }), "'width'"));
+	CHECK(Contains(ErrorOf(session, "render.screenshot", { { "path", "x.png" }, { "camera", "999" } }), "camera"));
+	const std::string notACamera = Ok(session, "entity.create", { { "name", "Plain" } })["id"];
+	CHECK(Contains(ErrorOf(session, "render.screenshot", { { "path", "x.png" }, { "camera", notACamera } }), "camera component"));
+}
+
+TEST_CASE("Agent: render.screenshot renders the scene to a PNG file and inline")
+{
+	if (!GetTestRenderDevice())
+		return;
+
+	namespace fs = std::filesystem;
+	const std::string path = (fs::temp_directory_path() / "lumen_agent_shot.png").string();
+
+	AgentSession session;
+	BuildRenderableScene(session);
+	Ok(session, "render.set", { { "ambient", { 0, 0, 0 } }, { "enableShadows", false } });
+
+	Json result = Ok(session, "render.screenshot", { { "path", path }, { "width", 128 }, { "height", 96 }, { "inline", true } });
+	CHECK(result["width"] == 128);
+	CHECK(result["height"] == 96);
+	CHECK_FALSE(result["device"].get<std::string>().empty());
+
+	REQUIRE(fs::exists(path));
+	std::ifstream file(path, std::ios::binary);
+	std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(file)), {});
+	file.close();
+	fs::remove(path);
+	auto fromFile = ImageIO::DecodeLDR(bytes.data(), bytes.size());
+	REQUIRE(fromFile.has_value());
+	CHECK(fromFile->Width == 128);
+	CHECK(fromFile->Height == 96);
+	CHECK(CenterLuminance(*fromFile) > 100.0f); // the lit sphere
+
+	ImageData inlined = DecodeInline(result);
+	CHECK(inlined.Pixels == fromFile->Pixels); // identical bytes both ways
+	const uint8_t* corner = inlined.PixelAt(2, 2);
+	CHECK(corner[0] < 60); // background is dark
+
+	// Failing to write leaves a clear error.
+	CHECK(Contains(ErrorOf(session, "render.screenshot", { { "path", "/no/such/dir/x.png" } }), "could not write"));
+}
+
+TEST_CASE("Agent: render.set validates atomically and changes what the next screenshot shows")
+{
+	if (!GetTestRenderDevice())
+		return;
+
+	AgentSession session;
+	BuildRenderableScene(session);
+
+	Json defaults = Ok(session, "render.set");
+	CHECK(defaults["exposure"] == 1.0);
+	CHECK(defaults["enableShadows"] == true);
+
+	CHECK(Contains(ErrorOf(session, "render.set", { { "exposure", -1 } }), "'exposure'"));
+	CHECK(Contains(ErrorOf(session, "render.set", { { "exposure", "bright" } }), "must be a number"));
+	CHECK(Contains(ErrorOf(session, "render.set", { { "enableShadows", 1 } }), "must be a boolean"));
+	CHECK(Contains(ErrorOf(session, "render.set", { { "ambient", { 1, 2 } } }), "'ambient'"));
+	// A request with one bad field must not apply the good ones.
+	CHECK(Contains(ErrorOf(session, "render.set", { { "exposure", 2.0 }, { "aoRadius", -5 } }), "'aoRadius'"));
+	CHECK(Ok(session, "render.set")["exposure"] == 1.0);
+
+	Ok(session, "render.set", { { "ambient", { 0, 0, 0 } } });
+	const float normal = CenterLuminance(DecodeInline(Ok(session, "render.screenshot", { { "inline", true }, { "width", 64 }, { "height", 64 } })));
+	CHECK(Ok(session, "render.set", { { "exposure", 0.2 } })["exposure"] == doctest::Approx(0.2));
+	const float dim = CenterLuminance(DecodeInline(Ok(session, "render.screenshot", { { "inline", true }, { "width", 64 }, { "height", 64 } })));
+	CHECK(dim < normal - 30.0f);
+}
+
+TEST_CASE("Agent: environments can be set, replaced and removed; the screenshot size can change in between")
+{
+	if (!GetTestRenderDevice())
+		return;
+
+	AgentSession session;
+	BuildRenderableScene(session);
+	Ok(session, "render.set", { { "ambient", { 0, 0, 0 } }, { "clearColor", { 1, 0, 0 } } });
+
+	auto corner = [&](int size)
+	{
+		ImageData image = DecodeInline(Ok(session, "render.screenshot", { { "inline", true }, { "width", size }, { "height", size } }));
+		const uint8_t* p = image.PixelAt(2, 2);
+		return glm::vec3(p[0], p[1], p[2]);
+	};
+
+	const glm::vec3 plain = corner(64);
+	CHECK(plain.r > plain.b + 100.0f); // the red clear color
+
+	CHECK(Ok(session, "render.set_environment", { { "source", "sky" } })["environment"] == "sky");
+	const glm::vec3 withSky = corner(64);
+	CHECK(withSky.b > withSky.r - 30.0f); // sky colors replace the clear color
+	CHECK(corner(96).b > 100.0f);       // re-created at a new size, environment preserved
+
+	Ok(session, "render.set_environment", { { "source", "none" } });
+	CHECK(corner(64).r > corner(64).b + 100.0f);
+
+	CHECK(Contains(ErrorOf(session, "render.set_environment"), "missing argument 'source'"));
+	CHECK(Contains(ErrorOf(session, "render.set_environment", { { "source", 5 } }), "'source' must be a string"));
+	CHECK(Contains(ErrorOf(session, "render.set_environment", { { "source", "/no/such.hdr" } }), "could not read"));
+	CHECK(Contains(ErrorOf(session, "render.set_environment", { { "source", "/proc/version" } }), "could not decode")); // exists but is not an HDR image
+}
+
+TEST_CASE("Agent: screenshots show the live play state")
+{
+	if (!GetTestRenderDevice())
+		return;
+
+	AgentSession session;
+	Ok(session, "entity.create", { { "name", "Camera" }, { "camera", Json::object() }, { "transform", { { "translation", { 0, 0, 6 } } } } });
+	Ok(session, "entity.create", { { "name", "Sun" }, { "directionalLight", Json::object() } });
+	Ok(session, "entity.create", { { "name", "Ball" }, { "transform", { { "translation", { 0, 0, 0 } } } },
+		{ "meshRenderer", { { "primitive", "sphere" }, { "material", { { "roughness", 0.8 } } } } },
+		{ "collider", { { "shape", "sphere" } } }, { "rigidbody", Json::object() } });
+	Ok(session, "render.set", { { "ambient", { 0, 0, 0 } }, { "enableShadows", false } });
+
+	auto centerLuminance = [&]
+	{
+		return CenterLuminance(DecodeInline(Ok(session, "render.screenshot", { { "inline", true }, { "width", 64 }, { "height", 64 } })));
+	};
+	CHECK(centerLuminance() > 100.0f); // the ball sits at the center
+
+	Ok(session, "play.start");
+	Ok(session, "play.step", { { "frames", 90 } }); // it falls out of the view
+	CHECK(centerLuminance() < 60.0f);
+	Ok(session, "play.stop");
+	CHECK(centerLuminance() > 100.0f); // edit scene restored
 }

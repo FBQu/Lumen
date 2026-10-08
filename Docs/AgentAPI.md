@@ -53,6 +53,9 @@ Rotation is Euler radians. A collider without a rigidbody is static. All fields 
 | `play.stop` | | restores the edit scene exactly |
 | `script.eval` (play mode) | `code` | the returned value as text, or `null` |
 | `physics.raycast` (play mode) | `origin`, `direction`, `maxDistance` | `{entity, point, normal, distance}` or `null` |
+| `render.screenshot` | `path` and/or `inline: true`, optional `width`/`height` (64..4096, default 1280x720), `camera` (entity id; default: first camera) | `{width, height, device, path?, png_base64?}`; renders the live scene (edit or play state) |
+| `render.set` | any of `exposure`, `ambient[3]`, `clearColor[3]`, `environmentIntensity`, `showBackground`, `enableShadows`, `shadowDistance`, `shadowSoftness`, `enableAmbientOcclusion`, `aoRadius`, `aoIntensity`, `aoPower` | the current settings; validated atomically |
+| `render.set_environment` | `source`: `"sky"` (procedural), `"none"`, or a `.hdr` path (Poly Haven HDRIs work); optional `intensity`, `showBackground` | `{environment}` |
 | `log.get` | `clear` (bool) | recent engine log lines, including script errors |
 
 ## Lua scripting API (inside scripts and `script.eval`)
