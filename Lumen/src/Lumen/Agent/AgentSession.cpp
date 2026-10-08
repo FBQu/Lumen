@@ -214,6 +214,7 @@ namespace Lumen {
 			Scripts.Stop();
 			Physics.Stop();
 			SceneData.Clear();
+			SceneData.ClearPrefabs();
 			std::string error;
 			if (!SceneSerializer::Deserialize(SceneData, EditSnapshot, &error))
 				LM_ERROR("Failed to restore the edit scene: {}", error); // unreachable: the snapshot was serialized by us
@@ -248,6 +249,7 @@ namespace Lumen {
 				RequireEditing("scene.load");
 				const std::string previous = SceneSerializer::Serialize(SceneData);
 				SceneData.Clear();
+				SceneData.ClearPrefabs();
 				std::string error;
 				if (!SceneSerializer::Deserialize(SceneData, Require(args, "scene").dump(), &error))
 				{
@@ -261,6 +263,7 @@ namespace Lumen {
 			{
 				RequireEditing("scene.clear");
 				SceneData.Clear();
+				SceneData.ClearPrefabs();
 				return Json{ { "entityCount", 0 } };
 			};
 
@@ -468,6 +471,59 @@ namespace Lumen {
 				if (inlineImage)
 					result["png_base64"] = Base64::Encode(ImageIO::EncodePNG(image));
 				return result;
+			};
+
+			Commands["prefab.create"] = [this](const Json& args)
+			{
+				const Json& name = Require(args, "name");
+				if (!name.is_string())
+					throw CommandError("'name' must be a string");
+				std::string error;
+				if (!SceneSerializer::CreatePrefab(SceneData, name.get<std::string>(), RequireEntity(Json{ { "id", Require(args, "entity") } }), &error))
+					throw CommandError(error);
+				return Json{ { "name", name } };
+			};
+
+			Commands["prefab.spawn"] = [this](const Json& args)
+			{
+				const Json& name = Require(args, "name");
+				if (!name.is_string())
+					throw CommandError("'name' must be a string");
+				std::string overrides;
+				if (auto it = args.find("overrides"); it != args.end())
+				{
+					if (!it->is_object())
+						throw CommandError("'overrides' must be an object");
+					overrides = it->dump();
+				}
+				std::string error;
+				Entity entity = SceneSerializer::SpawnPrefab(SceneData, name.get<std::string>(), overrides, &error);
+				if (!entity.IsValid())
+					throw CommandError(error);
+				return Json{ { "id", IDString(entity.GetUUID()) }, { "name", entity.GetName() } };
+			};
+
+			Commands["prefab.list"] = [this](const Json&) { return Json(SceneData.GetPrefabNames()); };
+
+			Commands["prefab.get"] = [this](const Json& args)
+			{
+				const Json& name = Require(args, "name");
+				if (!name.is_string())
+					throw CommandError("'name' must be a string");
+				const std::string* stored = SceneData.FindPrefab(name.get<std::string>());
+				if (stored == nullptr)
+					throw CommandError("prefab not found");
+				return Json::parse(*stored);
+			};
+
+			Commands["prefab.delete"] = [this](const Json& args)
+			{
+				const Json& name = Require(args, "name");
+				if (!name.is_string())
+					throw CommandError("'name' must be a string");
+				if (!SceneData.RemovePrefab(name.get<std::string>()))
+					throw CommandError("prefab not found");
+				return Json{ { "prefabs", SceneData.GetPrefabNames().size() } };
 			};
 
 			Commands["play.start"] = [this](const Json&)

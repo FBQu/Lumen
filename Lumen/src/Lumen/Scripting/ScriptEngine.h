@@ -3,6 +3,7 @@
 #include "Lumen/Core/Base.h"
 #include "Lumen/Core/UUID.h"
 
+#include <cstdint>
 #include <string>
 #include <string_view>
 
@@ -30,6 +31,11 @@ namespace Lumen {
 		void Update(float deltaTime);
 
 		bool IsRunning() const { return m_Scene != nullptr; }
+
+		// Every script callback (and every Execute call) may run at most this many Lua VM instructions (approximately)
+		// before it is aborted with an error, so a runaway loop cannot hang the engine. Default: 5 million.
+		void SetInstructionLimit(uint64_t limit);
+		uint64_t GetInstructionLimit() const;
 		size_t GetInstanceCount() const;
 
 		// Runs a Lua snippet in the engine's global environment. Returns false and logs on error.

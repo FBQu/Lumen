@@ -200,3 +200,96 @@ TEST_CASE("Render component JSON is validated")
 	CHECK(Fails(Wrap(R"({"id":"1","directionalLight":{"intensity":-1}})"), "must not be negative"));
 	CHECK(Fails(Wrap(R"({"id":"1","directionalLight":[]})"), "'directionalLight' must be an object"));
 }
+
+// ---------------------------------------------------------------------------------------------
+// Prefabs
+// ---------------------------------------------------------------------------------------------
+
+TEST_CASE("Prefabs: create from an entity, spawn copies with fresh ids and overrides")
+{
+	Scene scene;
+	Entity original = scene.CreateEntity("Bullet");
+	original.GetComponent<TransformComponent>().Scale = { 0.2f, 0.2f, 0.2f };
+	original.AddComponent<MeshRendererComponent>().Primitive = PrimitiveType::Sphere;
+	original.AddComponent<ColliderComponent>().Shape = ColliderShape::Sphere;
+	original.AddComponent<RigidbodyComponent>().Mass = 0.5f;
+
+	std::string error;
+	REQUIRE_MESSAGE(SceneSerializer::CreatePrefab(scene, "Bullet", original, &error), error);
+	CHECK(scene.GetPrefabNames() == std::vector<std::string>{ "Bullet" });
+	CHECK(scene.FindPrefab("Bullet")->find("\"id\"") == std::string::npos); // templates carry no id
+
+	Entity a = SceneSerializer::SpawnPrefab(scene, "Bullet", "", &error);
+	REQUIRE_MESSAGE(a.IsValid(), error);
+	Entity b = SceneSerializer::SpawnPrefab(scene, "Bullet", R"({"name":"Fast bullet","transform":{"translation":[1,2,3]},"rigidbody":{"mass":2}})", &error);
+	REQUIRE_MESSAGE(b.IsValid(), error);
+
+	CHECK(scene.GetEntityCount() == 3);
+	CHECK(a.GetUUID() != original.GetUUID());
+	CHECK(a.GetUUID() != b.GetUUID());
+	CHECK(a.GetName() == "Bullet");
+	CHECK(a.GetComponent<TransformComponent>().Scale == glm::vec3(0.2f));
+	CHECK(a.GetComponent<RigidbodyComponent>().Mass == doctest::Approx(0.5f));
+	CHECK(b.GetName() == "Fast bullet");
+	CHECK(b.GetComponent<TransformComponent>().Translation == glm::vec3(1, 2, 3));
+	CHECK(b.GetComponent<TransformComponent>().Scale == glm::vec3(0.2f)); // untouched fields come from the prefab
+	CHECK(b.GetComponent<RigidbodyComponent>().Mass == doctest::Approx(2.0f));
+
+	// Later changes to the source do not affect the prefab.
+	original.GetComponent<TransformComponent>().Scale = glm::vec3(9.0f);
+	CHECK(SceneSerializer::SpawnPrefab(scene, "Bullet").GetComponent<TransformComponent>().Scale == glm::vec3(0.2f));
+}
+
+TEST_CASE("Prefabs: validation and atomic failures")
+{
+	Scene scene;
+	Entity e = scene.CreateEntity("E");
+	std::string error;
+
+	CHECK_FALSE(SceneSerializer::CreatePrefab(scene, "", e, &error));
+	CHECK(error.find("1 to 128") != std::string::npos);
+	CHECK_FALSE(SceneSerializer::CreatePrefab(scene, std::string(129, 'x'), e, &error));
+	CHECK_FALSE(SceneSerializer::CreatePrefab(scene, "P", Entity{}, &error));
+	CHECK(error.find("does not exist") != std::string::npos);
+	REQUIRE(SceneSerializer::CreatePrefab(scene, "P", e));
+
+	CHECK_FALSE(SceneSerializer::SpawnPrefab(scene, "missing", "", &error).IsValid());
+	CHECK(error.find("does not exist") != std::string::npos);
+	CHECK_FALSE(SceneSerializer::SpawnPrefab(scene, "P", "{broken", &error).IsValid());
+	CHECK_FALSE(SceneSerializer::SpawnPrefab(scene, "P", "[]", &error).IsValid());
+	CHECK_FALSE(SceneSerializer::SpawnPrefab(scene, "P", R"({"id":"5"})", &error).IsValid());
+	CHECK(error.find("assigned by the engine") != std::string::npos);
+	CHECK_FALSE(SceneSerializer::SpawnPrefab(scene, "P", R"({"collider":{"shape":"torus"}})", &error).IsValid());
+	CHECK(scene.GetEntityCount() == 1); // failed spawns leave nothing behind
+}
+
+TEST_CASE("Prefabs are saved with the scene, validated on load, and replaced by name")
+{
+	Scene original;
+	Entity e = original.CreateEntity("Crate");
+	e.AddComponent<MeshRendererComponent>();
+	REQUIRE(SceneSerializer::CreatePrefab(original, "Crate", e));
+	REQUIRE(SceneSerializer::CreatePrefab(original, "Other", original.CreateEntity("Other")));
+
+	const std::string json = SceneSerializer::Serialize(original);
+	Scene loaded;
+	std::string error;
+	REQUIRE_MESSAGE(SceneSerializer::Deserialize(loaded, json, &error), error);
+	CHECK(loaded.GetPrefabNames() == std::vector<std::string>{ "Crate", "Other" });
+	CHECK(SceneSerializer::Serialize(loaded).size() == json.size()); // stable format
+	CHECK(SceneSerializer::SpawnPrefab(loaded, "Crate").HasComponent<MeshRendererComponent>());
+
+	// A scene without prefabs serializes without the key, and a bad prefab rejects the whole load.
+	CHECK(SceneSerializer::Serialize(Scene{}).find("prefabs") == std::string::npos);
+	Scene rejected;
+	CHECK_FALSE(SceneSerializer::Deserialize(rejected, R"({"version":1,"entities":[{"id":"1"}],"prefabs":{"Bad":{"collider":{"shape":"torus"}}}})", &error));
+	CHECK(error.find("prefab 'Bad'") != std::string::npos);
+	CHECK(rejected.GetEntityCount() == 0);
+	CHECK_FALSE(SceneSerializer::Deserialize(rejected, R"({"version":1,"entities":[],"prefabs":[]})", &error));
+	CHECK_FALSE(SceneSerializer::Deserialize(rejected, R"({"version":1,"entities":[],"prefabs":{"":{}}})", &error));
+	CHECK_FALSE(SceneSerializer::Deserialize(rejected, R"({"version":1,"entities":[],"prefabs":{"X":5}})", &error));
+
+	loaded.ClearPrefabs();
+	CHECK(loaded.GetPrefabNames().empty());
+	CHECK_FALSE(loaded.RemovePrefab("Crate"));
+}

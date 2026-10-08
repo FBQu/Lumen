@@ -498,3 +498,62 @@ TEST_CASE("Agent: screenshots show the live play state")
 	Ok(session, "play.stop");
 	CHECK(centerLuminance() > 100.0f); // edit scene restored
 }
+
+TEST_CASE("Agent: prefabs can be created, spawned, listed, inspected and deleted")
+{
+	AgentSession session;
+	const std::string source = Ok(session, "entity.create", { { "name", "Crate" }, { "meshRenderer", { { "primitive", "cube" } } }, { "transform", { { "scale", { 2, 2, 2 } } } } })["id"];
+
+	CHECK(Ok(session, "prefab.create", { { "name", "Crate" }, { "entity", source } })["name"] == "Crate");
+	CHECK(Ok(session, "prefab.list") == Json::array({ "Crate" }));
+	Json stored = Ok(session, "prefab.get", { { "name", "Crate" } });
+	CHECK_FALSE(stored.contains("id"));
+	CHECK(stored["transform"]["scale"][0] == 2.0);
+
+	Json spawned = Ok(session, "prefab.spawn", { { "name", "Crate" }, { "overrides", { { "name", "Crate 2" }, { "transform", { { "translation", { 4, 0, 0 } } } } } } });
+	CHECK(spawned["name"] == "Crate 2");
+	CHECK(spawned["id"] != source);
+	Json entity = Ok(session, "entity.get", { { "id", spawned["id"] } });
+	CHECK(entity["transform"]["translation"][0] == 4.0);
+	CHECK(entity["transform"]["scale"][0] == 2.0);
+	CHECK(session.GetScene().GetEntityCount() == 2);
+
+	// Prefabs travel with the scene JSON and survive a play session.
+	Json scene = Ok(session, "scene.get");
+	CHECK(scene["prefabs"].contains("Crate"));
+	Ok(session, "play.start");
+	Ok(session, "play.stop");
+	CHECK(Ok(session, "prefab.list") == Json::array({ "Crate" }));
+	Ok(session, "scene.clear");
+	CHECK(Ok(session, "prefab.list").empty());
+	Ok(session, "scene.load", { { "scene", scene } });
+	CHECK(Ok(session, "prefab.list") == Json::array({ "Crate" }));
+
+	CHECK(Ok(session, "prefab.delete", { { "name", "Crate" } })["prefabs"] == 0);
+	CHECK(Contains(ErrorOf(session, "prefab.get", { { "name", "Crate" } }), "not found"));
+	CHECK(Contains(ErrorOf(session, "prefab.delete", { { "name", "Crate" } }), "not found"));
+	CHECK(Contains(ErrorOf(session, "prefab.spawn", { { "name", "Crate" } }), "does not exist"));
+}
+
+TEST_CASE("Agent: prefab commands validate their input; scripts spawn prefabs during play")
+{
+	AgentSession session;
+	const std::string source = Ok(session, "entity.create", { { "name", "Orb" }, { "meshRenderer", { { "primitive", "sphere" } } } })["id"];
+
+	CHECK(Contains(ErrorOf(session, "prefab.create"), "missing argument 'name'"));
+	CHECK(Contains(ErrorOf(session, "prefab.create", { { "name", 5 }, { "entity", source } }), "'name' must be a string"));
+	CHECK(Contains(ErrorOf(session, "prefab.create", { { "name", "Orb" } }), "missing argument 'entity'"));
+	CHECK(Contains(ErrorOf(session, "prefab.create", { { "name", "Orb" }, { "entity", "999" } }), "not found"));
+	CHECK(Contains(ErrorOf(session, "prefab.create", { { "name", "" }, { "entity", source } }), "1 to 128"));
+	CHECK(Contains(ErrorOf(session, "prefab.spawn", { { "name", "Orb" }, { "overrides", 5 } }), "'overrides' must be an object"));
+	Ok(session, "prefab.create", { { "name", "Orb" }, { "entity", source } });
+	CHECK(Contains(ErrorOf(session, "prefab.spawn", { { "name", "Orb" }, { "overrides", { { "id", "7" } } } }), "assigned by the engine"));
+
+	Ok(session, "entity.create", { { "name", "Spawner" }, { "script", { { "source",
+		"return { OnUpdate = function(self) Scene.Spawn('Orb', { Name = 'Spawned', Translation = vec3.new(0, 5, 0) }) end }" } } } });
+	Ok(session, "play.start");
+	Ok(session, "play.step", { { "frames", 3 } });
+	CHECK(Ok(session, "play.state")["entityCount"] == 5); // orb + spawner + 3 spawned
+	Ok(session, "play.stop");
+	CHECK(session.GetScene().GetEntityCount() == 2);       // spawned entities vanish with the play session
+}

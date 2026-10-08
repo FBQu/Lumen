@@ -383,9 +383,15 @@ namespace Lumen {
 		for (auto [handle, id] : scene.GetRegistry().view<const IDComponent>().each())
 			entities.push_back(EntityToJson(scene.GetRegistry(), handle));
 
+		Json prefabs = Json::object();
+		for (const std::string& name : scene.GetPrefabNames())
+			prefabs[name] = Json::parse(*scene.FindPrefab(name));
+
 		Json root;
 		root["version"] = s_FormatVersion;
 		root["entities"] = std::move(entities);
+		if (!prefabs.empty())
+			root["prefabs"] = std::move(prefabs);
 		return root.dump(2);
 	}
 
@@ -399,6 +405,7 @@ namespace Lumen {
 		};
 
 		std::vector<EntityData> parsed;
+		std::vector<std::pair<std::string, std::string>> prefabs;
 		try
 		{
 			Json root = Json::parse(json);
@@ -425,6 +432,31 @@ namespace Lumen {
 					return fail("entity id " + std::to_string(static_cast<uint64_t>(data.ID)) + " already exists in the scene");
 				parsed.push_back(std::move(data));
 			}
+
+			if (auto it = root.find("prefabs"); it != root.end())
+			{
+				if (!it->is_object())
+					return fail("'prefabs' must be an object");
+				for (auto& [name, templateJson] : it->items())
+				{
+					if (name.empty() || name.size() > 128)
+						return fail("prefab names must be 1 to 128 characters");
+					Json entry = templateJson;
+					if (!entry.is_object())
+						return fail("prefab '" + name + "' must be an object");
+					entry["id"] = "1"; // templates carry no id; any valid one lets us reuse the entity validation
+					try
+					{
+						ParseEntity(entry);
+					}
+					catch (const ParseError& e)
+					{
+						return fail("prefab '" + name + "': " + e.what());
+					}
+					entry.erase("id");
+					prefabs.emplace_back(name, entry.dump());
+				}
+			}
 		}
 		catch (const ParseError& e)
 		{
@@ -439,7 +471,75 @@ namespace Lumen {
 		{
 			ApplyData(scene.CreateEntityWithUUID(data.ID, data.Name), data);
 		}
+		for (auto& [name, templateJson] : prefabs)
+			scene.SetPrefab(name, std::move(templateJson));
 		return true;
+	}
+
+	bool SceneSerializer::CreatePrefab(Scene& scene, const std::string& name, Entity source, std::string* error)
+	{
+		if (name.empty() || name.size() > 128)
+		{
+			if (error)
+				*error = "prefab names must be 1 to 128 characters";
+			return false;
+		}
+		if (!source.IsValid())
+		{
+			if (error)
+				*error = "entity does not exist";
+			return false;
+		}
+		Json entry = EntityToJson(scene.GetRegistry(), source.GetHandle());
+		entry.erase("id");
+		scene.SetPrefab(name, entry.dump());
+		return true;
+	}
+
+	Entity SceneSerializer::SpawnPrefab(Scene& scene, const std::string& name, std::string_view overridesJson, std::string* error)
+	{
+		auto fail = [error](const std::string& message)
+		{
+			if (error)
+				*error = message;
+			return Entity{};
+		};
+
+		const std::string* stored = scene.FindPrefab(name);
+		if (stored == nullptr)
+			return fail("prefab '" + name + "' does not exist");
+
+		try
+		{
+			Json entry = Json::parse(*stored);
+			const UUID id;
+			entry["id"] = std::to_string(static_cast<uint64_t>(id));
+			if (!overridesJson.empty())
+			{
+				Json overrides = Json::parse(overridesJson);
+				if (!overrides.is_object())
+					return fail("overrides must be an object");
+				if (overrides.contains("id"))
+					return fail("the id of a spawned entity is assigned by the engine");
+				entry.merge_patch(overrides);
+			}
+
+			// Validate the merged result before creating anything.
+			ParseEntity(entry);
+			const Json single = { { "version", s_FormatVersion }, { "entities", Json::array({ entry }) } };
+			std::string deserializeError;
+			if (!Deserialize(scene, single.dump(), &deserializeError))
+				return fail(deserializeError);
+			return scene.FindEntityByUUID(id);
+		}
+		catch (const ParseError& e)
+		{
+			return fail(e.what());
+		}
+		catch (const Json::exception& e)
+		{
+			return fail(std::string("invalid JSON: ") + e.what());
+		}
 	}
 
 	std::string SceneSerializer::SerializeEntity(Scene& scene, Entity entity)

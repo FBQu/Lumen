@@ -57,6 +57,21 @@ namespace Lumen {
 		return Entity{};
 	}
 
+	const std::string* Scene::FindPrefab(const std::string& name) const
+	{
+		auto it = m_Prefabs.find(name);
+		return it != m_Prefabs.end() ? &it->second : nullptr;
+	}
+
+	std::vector<std::string> Scene::GetPrefabNames() const
+	{
+		std::vector<std::string> names;
+		names.reserve(m_Prefabs.size());
+		for (const auto& [name, json] : m_Prefabs)
+			names.push_back(name);
+		return names;
+	}
+
 	size_t Scene::GetEntityCount() const
 	{
 		return m_EntityMap.size();

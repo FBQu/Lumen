@@ -47,6 +47,9 @@ Rotation is Euler radians. A collider without a rigidbody is static. All fields 
 | `asset.import_gltf` | `path` (.gltf/.glb) | `{model, name, nodes, primitives, warnings}`; idempotent; ids derive from the path, so use project-relative paths |
 | `asset.list` | | `{meshes, materials, textures}` |
 | `asset.instantiate` | `model`, optional `transform {translation, rotation, scale}` | `{entities: [{id, name}]}`, one entity per mesh primitive |
+| `prefab.create` | `name`, `entity` (id) | `{name}`; stores a copy of the entity as a template saved with the scene |
+| `prefab.spawn` | `name`, optional `overrides` (JSON merge patch, e.g. `{"name": "Bullet", "transform": {"translation": [0,1,0]}}`) | `{id, name}` |
+| `prefab.list`, `prefab.get`, `prefab.delete` | `name` (get/delete) | names / template JSON / `{prefabs}` |
 | `play.start` | | `{playing}`; snapshots the edit scene, starts physics and scripts |
 | `play.step` | `frames` (1..100000, default 1), `dt` (default 1/60) | `{frame, entityCount}` |
 | `play.state` | | `{playing, frame, entityCount}` |
@@ -67,7 +70,13 @@ A script returns a table with optional `OnCreate(self)`, `OnUpdate(self, dt)`, `
 - `Scene.CreateEntity(name)`, `Scene.DestroyEntity(e)`, `Scene.FindEntityByName(n)`, `Scene.FindEntityByID(id)`, `Scene.GetEntityCount()`
 - `e:AddRigidbody{Type=,Mass=,...}`, `e:AddCollider{Shape=,HalfExtents=,Radius=,...}`, `e:HasRigidbody()`, `e:HasCollider()`
 - `Physics.SetGravity/GetGravity/AddForce/AddImpulse/SetVelocity/GetVelocity/Raycast`
+- `e.MeshRenderer` (`Primitive`, `BaseColor` vec4, `Metallic`, `Roughness`, `Emissive` vec3, `CastShadows`), `e.Camera` (`FovDegrees`, `Near`, `Far`), `e.DirectionalLight` (`Color`, `Intensity`);
+  `e:AddMeshRenderer{...}`, `e:AddCamera{...}`, `e:AddDirectionalLight{...}`, `e:SetScript(source)`, `e:Has<Component>()`, `e:RemoveComponent("MeshRenderer"|"Rigidbody"|"Collider"|"Camera"|"DirectionalLight"|"Script")`
+- `Scene.Spawn(prefab, {Name=, Translation=, Rotation=, Scale=})`, `Scene.HasPrefab(name)`, `Scene.GetAllEntities()`
+- `vec4.new(x,y,z,w)`
 - `Log.Info/Warn/Error/Trace(message)`
+
+Every callback and `script.eval` call is limited to about 5 million VM instructions; runaway loops are aborted with an error.
 
 The sandbox exposes only base, math, string, table, utf8 and coroutine libraries.
 
