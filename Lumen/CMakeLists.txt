@@ -53,3 +53,8 @@ if(MSVC)
 else()
     target_compile_options(LumenPlatform PRIVATE -Wall -Wextra -Wpedantic -Werror)
 endif()
+
+# GCC 13 reports a false-positive -Warray-bounds inside sol2's string-literal key lookups at -O2 (Release builds only).
+if(NOT MSVC)
+    set_source_files_properties(src/Lumen/Scripting/ScriptEngine.cpp PROPERTIES COMPILE_OPTIONS "-Wno-array-bounds")
+endif()

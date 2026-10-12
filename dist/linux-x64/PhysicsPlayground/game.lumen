@@ -1,0 +1,20 @@
+{
+  "name": "Physics Playground",
+  "scene": "scene.json",
+  "models": [],
+  "environment": "sky",
+  "quitOnEscape": true,
+  "window": {
+    "title": "Lumen - Physics Playground",
+    "width": 1280,
+    "height": 720,
+    "vsync": true
+  },
+  "renderer": {
+    "exposure": 1.0,
+    "environmentIntensity": 1.0,
+    "enableShadows": true,
+    "enableAmbientOcclusion": true,
+    "shadowSoftness": 0.03
+  }
+}
