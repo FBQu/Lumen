@@ -39,6 +39,12 @@ ctest --test-dir build --output-on-failure
 - `Apps/LumenAgent/` headless JSON-over-stdio host for AI agents. Keep `Docs/AgentAPI.md` in sync with new commands.
 - `Tests/` doctest unit tests, one file per module. GPU-free logic must be unit tested.
 
+## Running things
+- `LumenRuntime <project-dir>` plays a project in a window (`--screenshot out.png --frames N` for automated runs, `--export <dir>` to make a standalone game folder).
+- `LumenAgent` is the headless JSON-lines host for AI agents (see `Docs/AgentAPI.md`).
+- Window tests need a display: ctest runs them under `xvfb-run` when available.
+- Linux build dependencies: cmake, ninja, g++ 13, glslang-tools (glslangValidator), libvulkan-dev, libx11/xrandr/xinerama/xcursor/xi dev packages. Runtime: a Vulkan 1.3 driver.
+
 ## Roadmap
 1. Core + ECS (done) 2. Lua scripting API (done: lifecycle, vec3/vec4, Transform, render components, prefab spawning, Scene API, sandbox, instruction limit; TODO: audio/input bindings) 3. Physics (Jolt) (done: bodies, forces, raycast, tests; Lua API done; TODO: collision events, triggers, rebuild on component change) 4. Scene JSON serialization (done) 4b. Agent control API (done: AgentSession + LumenAgent stdio app, see Docs/AgentAPI.md; TODO: render/screenshot, asset import, prefab commands)
 5. Renderer (done: headless RenderDevice, shader embedding, primitives, forward PBR (directional light), HDR + ACES tonemap, GPU tests on llvmpipe; glTF importer (CPU side: meshes, materials, textures, nodes, tangents) done; asset manager, textured PBR materials (normal maps, alpha modes, double-sided), mip generation done; TODO: IBL (done: SH diffuse, GGX-prefiltered specular, BRDF LUT with multiple-scattering compensation, sky background, procedural sky), soft shadows (done: fitted texel-snapped single cascade, PCSS contact hardening; TODO: cascades, alpha-tested casters), SSAO (done: normal/depth prepass, horizon-based AO, depth-aware blur, specular occlusion), GLFW window, gizmo) (GLFW, nvrhi/Vulkan, glTF, PBR, IBL, shadows, SSAO, HDR) 6. Editor + export

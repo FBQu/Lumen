@@ -69,7 +69,12 @@ namespace Lumen {
 	struct RenderDevice::Vulkan
 	{
 		VkInstance Instance = VK_NULL_HANDLE;
+		VkPhysicalDevice PhysicalDevice = VK_NULL_HANDLE;
 		VkDevice Device = VK_NULL_HANDLE;
+		VkQueue Queue = VK_NULL_HANDLE;
+		uint32_t QueueFamily = 0;
+		VkSurfaceKHR Surface = VK_NULL_HANDLE;
+		nvrhi::vulkan::IDevice* NvrhiVulkan = nullptr; // the unwrapped backend device (valid while m_NvrhiDevice lives)
 		std::vector<std::string> InstanceExtensions;
 		std::vector<std::string> DeviceExtensions;
 	};
@@ -110,6 +115,16 @@ namespace Lumen {
 		vkEnumerateInstanceExtensionProperties(nullptr, &count, availableInstanceExtensions.data());
 		if (HasExtension(availableInstanceExtensions, VK_EXT_DEBUG_UTILS_EXTENSION_NAME))
 			vk.InstanceExtensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+		for (const std::string& extension : desc.InstanceExtensions)
+		{
+			if (!HasExtension(availableInstanceExtensions, extension.c_str()))
+			{
+				LM_ERROR("Required Vulkan instance extension {} is not available", extension);
+				return nullptr;
+			}
+			if (std::find(vk.InstanceExtensions.begin(), vk.InstanceExtensions.end(), extension) == vk.InstanceExtensions.end())
+				vk.InstanceExtensions.push_back(extension);
+		}
 
 		std::vector<const char*> layers;
 		if (desc.EnableValidation)
@@ -139,6 +154,16 @@ namespace Lumen {
 		}
 		volkLoadInstance(vk.Instance);
 
+		if (desc.CreateSurface)
+		{
+			vk.Surface = reinterpret_cast<VkSurfaceKHR>(desc.CreateSurface(vk.Instance));
+			if (vk.Surface == VK_NULL_HANDLE)
+			{
+				LM_ERROR("Could not create the window surface");
+				return nullptr;
+			}
+		}
+
 		// --- Physical device ------------------------------------------------------------------------------------------
 		vkEnumeratePhysicalDevices(vk.Instance, &count, nullptr);
 		std::vector<VkPhysicalDevice> physicalDevices(count);
@@ -163,7 +188,13 @@ namespace Lumen {
 			for (uint32_t i = 0; i < familyCount; i++)
 			{
 				const VkQueueFlags required = VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT;
-				if ((families[i].queueFlags & required) == required && ScoreDevice(properties) > bestScore)
+				VkBool32 canPresent = VK_TRUE;
+				if (vk.Surface != VK_NULL_HANDLE)
+				{
+					canPresent = VK_FALSE;
+					vkGetPhysicalDeviceSurfaceSupportKHR(candidate, i, vk.Surface, &canPresent);
+				}
+				if ((families[i].queueFlags & required) == required && canPresent && ScoreDevice(properties) > bestScore)
 				{
 					bestScore = ScoreDevice(properties);
 					physicalDevice = candidate;
@@ -219,6 +250,9 @@ namespace Lumen {
 
 		VkQueue queue = VK_NULL_HANDLE;
 		vkGetDeviceQueue(vk.Device, queueFamily, 0, &queue);
+		vk.PhysicalDevice = physicalDevice;
+		vk.Queue = queue;
+		vk.QueueFamily = queueFamily;
 
 		// --- nvrhi ----------------------------------------------------------------------------------------------------
 		nvrhi::vulkan::DeviceDesc deviceDesc;
@@ -244,6 +278,7 @@ namespace Lumen {
 			LM_ERROR("nvrhi failed to create a Vulkan device");
 			return nullptr;
 		}
+		vk.NvrhiVulkan = static_cast<nvrhi::vulkan::IDevice*>(self->m_NvrhiDevice.Get());
 		if (desc.EnableValidation)
 			self->m_NvrhiDevice = nvrhi::validation::createValidationLayer(self->m_NvrhiDevice);
 
@@ -263,9 +298,28 @@ namespace Lumen {
 		{
 			if (m_Vulkan->Device != VK_NULL_HANDLE)
 				vkDestroyDevice(m_Vulkan->Device, nullptr);
+			if (m_Vulkan->Surface != VK_NULL_HANDLE)
+				vkDestroySurfaceKHR(m_Vulkan->Instance, m_Vulkan->Surface, nullptr);
 			if (m_Vulkan->Instance != VK_NULL_HANDLE)
 				vkDestroyInstance(m_Vulkan->Instance, nullptr);
 		}
+	}
+
+	void* RenderDevice::GetVkInstance() const { return m_Vulkan->Instance; }
+	void* RenderDevice::GetVkPhysicalDevice() const { return m_Vulkan->PhysicalDevice; }
+	void* RenderDevice::GetVkDevice() const { return m_Vulkan->Device; }
+	void* RenderDevice::GetVkQueue() const { return m_Vulkan->Queue; }
+	uint32_t RenderDevice::GetGraphicsQueueFamily() const { return m_Vulkan->QueueFamily; }
+	uint64_t RenderDevice::GetVkSurface() const { return reinterpret_cast<uint64_t>(m_Vulkan->Surface); }
+
+	void RenderDevice::QueueWaitForSemaphore(uint64_t vkSemaphore)
+	{
+		m_Vulkan->NvrhiVulkan->queueWaitForSemaphore(nvrhi::CommandQueue::Graphics, reinterpret_cast<VkSemaphore>(vkSemaphore), 0);
+	}
+
+	void RenderDevice::QueueSignalSemaphore(uint64_t vkSemaphore)
+	{
+		m_Vulkan->NvrhiVulkan->queueSignalSemaphore(nvrhi::CommandQueue::Graphics, reinterpret_cast<VkSemaphore>(vkSemaphore), 0);
 	}
 
 	nvrhi::TextureHandle RenderDevice::CreateRenderTarget(uint32_t width, uint32_t height, nvrhi::Format format, const char* name)

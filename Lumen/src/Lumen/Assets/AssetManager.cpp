@@ -43,11 +43,17 @@ namespace Lumen {
 
 	std::optional<UUID> AssetManager::ImportGltf(const std::string& path, std::string* error)
 	{
+		return ImportGltf(path, "", error);
+	}
+
+	std::optional<UUID> AssetManager::ImportGltf(const std::string& path, const std::string& rootDirectory, std::string* error)
+	{
 		const UUID modelID = MakeAssetID(path, "model", 0);
 		if (m_Models.contains(modelID))
 			return modelID;
 
-		std::optional<ImportedModel> imported = GltfImporter::ImportFile(path, error);
+		const std::string filePath = rootDirectory.empty() ? path : rootDirectory + "/" + path;
+		std::optional<ImportedModel> imported = GltfImporter::ImportFile(filePath, error);
 		if (!imported)
 			return std::nullopt;
 

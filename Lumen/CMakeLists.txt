@@ -1,6 +1,6 @@
 include(${PROJECT_SOURCE_DIR}/cmake/Shaders.cmake)
 lumen_embed_shaders(LUMEN_SHADER_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/shaders
-    mesh.vert pbr.frag prepass.frag ssao.frag ssao_blur.frag sky.frag shadow.vert fullscreen.vert tonemap.frag)
+    mesh.vert pbr.frag prepass.frag ssao.frag ssao_blur.frag sky.frag shadow.vert fullscreen.vert tonemap.frag blit.frag)
 
 add_library(LumenCore STATIC
     src/Lumen/Agent/AgentSession.cpp
@@ -8,6 +8,7 @@ add_library(LumenCore STATIC
     src/Lumen/Assets/GltfImporter.cpp
     src/Lumen/Assets/ImageIO.cpp
     src/Lumen/Core/Base64.cpp
+    src/Lumen/Core/Input.cpp
     src/Lumen/Core/Log.cpp
     src/Lumen/Core/UUID.cpp
     src/Lumen/Physics/PhysicsWorld.cpp
@@ -17,6 +18,9 @@ add_library(LumenCore STATIC
     src/Lumen/Renderer/RenderDevice.cpp
     src/Lumen/Renderer/Shadow.cpp
     src/Lumen/Renderer/Renderer.cpp
+    src/Lumen/Runtime/GameSession.cpp
+    src/Lumen/Runtime/Project.cpp
+    src/Lumen/Runtime/ProjectExport.cpp
     src/Lumen/Scene/Scene.cpp
     src/Lumen/Scene/SceneSerializer.cpp
     src/Lumen/Scripting/ScriptEngine.cpp
@@ -38,4 +42,14 @@ endif()
 # The CPU-side environment/mip precomputation is loop-heavy: keep it optimized even in Debug builds.
 if(NOT MSVC)
     set_source_files_properties(src/Lumen/Renderer/Environment.cpp src/Lumen/Renderer/MipChain.cpp PROPERTIES COMPILE_OPTIONS "-O2")
+endif()
+
+# Windowing (GLFW + swapchain) lives in its own library so LumenCore stays usable headless.
+add_library(LumenPlatform STATIC src/Lumen/Platform/Window.cpp)
+target_link_libraries(LumenPlatform PUBLIC LumenCore PRIVATE glfw volk Vulkan::Headers)
+target_compile_definitions(LumenPlatform PRIVATE VK_NO_PROTOTYPES)
+if(MSVC)
+    target_compile_options(LumenPlatform PRIVATE /W4 /WX)
+else()
+    target_compile_options(LumenPlatform PRIVATE -Wall -Wextra -Wpedantic -Werror)
 endif()

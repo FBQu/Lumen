@@ -87,6 +87,9 @@ namespace Lumen {
 		// Imports a .gltf/.glb file (idempotent: importing the same path again returns the existing model).
 		// Returns the model id, or nullopt with `error` set.
 		std::optional<UUID> ImportGltf(const std::string& path, std::string* error = nullptr);
+		// Same, for a project: the file is read from `rootDirectory/relativePath`, but ids derive from `relativePath` alone,
+		// so they are identical on every machine and in exported games.
+		std::optional<UUID> ImportGltf(const std::string& relativePath, const std::string& rootDirectory, std::string* error);
 
 		// Creates one entity per mesh primitive of the model, with world transforms composed from the node tree.
 		// `rootTransform` is applied on top. Returns the created entities.

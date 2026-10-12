@@ -5,6 +5,7 @@
 #include <nvrhi/nvrhi.h>
 
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -29,6 +30,11 @@ namespace Lumen {
 		struct Desc
 		{
 			bool EnableValidation = false;
+			// Windowing support: extra instance extensions (e.g. the ones GLFW requires) and a callback that creates the
+			// window's VkSurfaceKHR from the VkInstance. The surface is used to pick a queue family that can present and is
+			// owned (and destroyed) by the device. Leave empty for headless use.
+			std::vector<std::string> InstanceExtensions;
+			std::function<uint64_t(void* vkInstance)> CreateSurface;
 		};
 
 		// Returns nullptr (after logging why) if no usable Vulkan device exists. Vulkan-Hpp's dispatcher is process-global, so
@@ -40,6 +46,17 @@ namespace Lumen {
 		RenderDevice& operator=(const RenderDevice&) = delete;
 
 		nvrhi::IDevice* GetDevice() const { return m_NvrhiDevice; }
+
+		// Native Vulkan handles for window system integration (opaque pointers so this header needs no Vulkan includes).
+		void* GetVkInstance() const;
+		void* GetVkPhysicalDevice() const;
+		void* GetVkDevice() const;
+		void* GetVkQueue() const;
+		uint32_t GetGraphicsQueueFamily() const;
+		uint64_t GetVkSurface() const; // 0 if the device was created headless
+		// Makes the next queue submission wait for / signal a binary semaphore (used around swapchain image acquire/present).
+		void QueueWaitForSemaphore(uint64_t vkSemaphore);
+		void QueueSignalSemaphore(uint64_t vkSemaphore);
 		const std::string& GetDeviceName() const { return m_DeviceName; }
 
 		nvrhi::TextureHandle CreateRenderTarget(uint32_t width, uint32_t height, nvrhi::Format format, const char* name);

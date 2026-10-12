@@ -41,6 +41,15 @@ FetchContent_MakeAvailable(glm entt lua sol2 JoltPhysics json nvrhi)
 # Vulkan headers come from the Vulkan-Headers target that nvrhi fetches.
 FetchContent_MakeAvailable(volk)
 
+# GLFW is used by the windowed targets only (LumenPlatform). X11 only on Linux for now (Wayland runs through XWayland).
+FetchContent_Declare(glfw GIT_REPOSITORY https://github.com/glfw/glfw.git GIT_TAG 3.4 GIT_SHALLOW ON)
+set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
+set(GLFW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(GLFW_INSTALL OFF CACHE BOOL "" FORCE)
+set(GLFW_BUILD_WAYLAND OFF CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(glfw)
+
 # stb is header-only and unversioned; pinned to a commit. No CMake project is used.
 FetchContent_Declare(stb GIT_REPOSITORY https://github.com/nothings/stb.git GIT_TAG 2c980bb59875b0d32144a71867fbdebb2f77cd20 SOURCE_SUBDIR _none)
 FetchContent_MakeAvailable(stb)

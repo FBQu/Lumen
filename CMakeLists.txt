@@ -9,11 +9,17 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 option(LUMEN_BUILD_TESTS "Build Lumen unit tests" ON)
 
+# Distributable builds: strip symbols and link the C++ runtime statically so binaries run on any recent Linux.
+if(UNIX AND NOT APPLE)
+    add_link_options($<$<CONFIG:Release>:-s> -static-libstdc++ -static-libgcc)
+endif()
+
 include(cmake/Dependencies.cmake)
 
 add_subdirectory(Lumen)
 add_subdirectory(Apps/LumenAgent)
 add_subdirectory(Apps/LumenRenderDemo)
+add_subdirectory(Apps/LumenRuntime)
 
 if(LUMEN_BUILD_TESTS)
     enable_testing()

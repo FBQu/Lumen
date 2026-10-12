@@ -1,5 +1,6 @@
 #include "Lumen/Scripting/ScriptEngine.h"
 
+#include "Lumen/Core/Input.h"
 #include "Lumen/Core/Log.h"
 #include "Lumen/Physics/PhysicsWorld.h"
 #include "Lumen/Scene/Entity.h"
@@ -210,6 +211,40 @@ namespace Lumen {
 			};
 		}
 
+		Key RequireKey(const std::string& name)
+		{
+			std::optional<Key> key = InputState::KeyFromName(name);
+			if (!key)
+				throw std::runtime_error("unknown key '" + name + "' (examples: \"w\", \"space\", \"left\", \"leftshift\", \"f5\")");
+			return *key;
+		}
+
+		MouseButton RequireMouseButton(const std::string& name)
+		{
+			std::optional<MouseButton> button = InputState::MouseButtonFromName(name);
+			if (!button)
+				throw std::runtime_error("unknown mouse button '" + name + "' (expected left, right or middle)");
+			return *button;
+		}
+
+		void BindInput(sol::state& lua, const InputState* const* input)
+		{
+			// `input` points at the engine's current InputState pointer so SetInput can swap it at any time.
+			auto state = [input]() -> const InputState* { return *input; };
+			sol::table table = lua.create_named_table("Input");
+			table["IsKeyDown"] = [state](const std::string& name) { const Key k = RequireKey(name); return state() && state()->IsKeyDown(k); };
+			table["WasKeyPressed"] = [state](const std::string& name) { const Key k = RequireKey(name); return state() && state()->WasKeyPressed(k); };
+			table["WasKeyReleased"] = [state](const std::string& name) { const Key k = RequireKey(name); return state() && state()->WasKeyReleased(k); };
+			table["IsMouseButtonDown"] = [state](const std::string& name) { const MouseButton b = RequireMouseButton(name); return state() && state()->IsMouseButtonDown(b); };
+			table["WasMouseButtonPressed"] = [state](const std::string& name) { const MouseButton b = RequireMouseButton(name); return state() && state()->WasMouseButtonPressed(b); };
+			table["WasMouseButtonReleased"] = [state](const std::string& name) { const MouseButton b = RequireMouseButton(name); return state() && state()->WasMouseButtonReleased(b); };
+			table["GetMouseX"] = [state]() { return state() ? state()->GetMousePosition().x : 0.0f; };
+			table["GetMouseY"] = [state]() { return state() ? state()->GetMousePosition().y : 0.0f; };
+			table["GetMouseDeltaX"] = [state]() { return state() ? state()->GetMouseDelta().x : 0.0f; };
+			table["GetMouseDeltaY"] = [state]() { return state() ? state()->GetMouseDelta().y : 0.0f; };
+			table["GetScroll"] = [state]() { return state() ? state()->GetScroll() : 0.0f; };
+		}
+
 		void BindLog(sol::state& lua)
 		{
 			sol::table log = lua.create_named_table("Log");
@@ -383,6 +418,7 @@ namespace Lumen {
 
 		static constexpr int s_HookInterval = 1000; // the hook fires every this many VM instructions
 
+		const InputState* Input = nullptr;
 		Scope<sol::state> Lua;
 		uint64_t InstructionLimit = 5'000'000;
 		uint64_t InstructionsUsed = 0;
@@ -407,6 +443,7 @@ namespace Lumen {
 			BindEntity(*Lua);
 			BindRenderComponents(*Lua);
 			BindLog(*Lua);
+			BindInput(*Lua, &Input);
 			BindScene(*Lua, scene);
 			BindPhysics(*Lua, physics);
 
@@ -547,6 +584,8 @@ namespace Lumen {
 				m_Impl->Call(entity, it->second, "OnUpdate", deltaTime);
 		}
 	}
+
+	void ScriptEngine::SetInput(const InputState* input) { m_Impl->Input = input; }
 
 	void ScriptEngine::SetInstructionLimit(uint64_t limit) { m_Impl->InstructionLimit = limit; }
 	uint64_t ScriptEngine::GetInstructionLimit() const { return m_Impl->InstructionLimit; }

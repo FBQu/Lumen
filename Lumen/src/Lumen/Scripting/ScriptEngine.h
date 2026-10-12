@@ -11,6 +11,7 @@ namespace Lumen {
 
 	class Scene;
 	class PhysicsWorld;
+	class InputState;
 
 	// Hosts the Lua state for one running Scene and drives ScriptComponent callbacks.
 	// Scripts run sandboxed: only base, math, string, table, utf8 and coroutine libraries are available.
@@ -31,6 +32,10 @@ namespace Lumen {
 		void Update(float deltaTime);
 
 		bool IsRunning() const { return m_Scene != nullptr; }
+
+		// Input read by the Lua `Input` table. May be null (all queries then report "not pressed"). The state must outlive
+		// the engine or be reset to nullptr before it is destroyed.
+		void SetInput(const InputState* input);
 
 		// Every script callback (and every Execute call) may run at most this many Lua VM instructions (approximately)
 		// before it is aborted with an error, so a runaway loop cannot hang the engine. Default: 5 million.
