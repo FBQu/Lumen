@@ -409,6 +409,9 @@ namespace Lumen {
 	void Window::SetCaptureEnabled(bool enabled) { m_Impl->CaptureEnabled = enabled; }
 	const ImageData& Window::GetLastFrame() const { return m_Impl->LastFrame; }
 
+	void Window::SetTitle(const std::string& title) { glfwSetWindowTitle(m_Impl->Handle, title.c_str()); }
+	void Window::WaitForEvents(double seconds) { glfwWaitEventsTimeout(seconds); }
+
 	void Window::PollEvents()
 	{
 		m_Impl->Input.BeginFrame();

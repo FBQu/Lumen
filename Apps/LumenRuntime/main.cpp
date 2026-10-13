@@ -12,7 +12,11 @@
 #include "Lumen/Runtime/ProjectExport.h"
 #include "Lumen/Runtime/GameSession.h"
 
-#include <GLFW/glfw3.h>
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#endif
 
 #include <chrono>
 #include <cstdio>
@@ -30,6 +34,7 @@ namespace {
 		std::string Project;
 		std::string ScreenshotPath;
 		std::string ExportDirectory;
+		std::string RuntimeExecutable; // with --export: the runtime binary to copy (default: this executable)
 		int Frames = 0;          // with --screenshot: number of frames to run before capturing (0 = until closed)
 		bool NoVSync = false;
 		bool ShowHelp = false;
@@ -42,6 +47,7 @@ namespace {
 			"Usage: LumenRuntime [project-dir | game.lumen] [options]\n\n"
 			"Options:\n"
 			"  --export <dir>        export the project as a standalone game folder and exit\n"
+			"  --runtime <exe>       with --export: ship this runtime binary instead (e.g. a Windows LumenRuntime.exe)\n"
 			"  --screenshot <file>   run --frames frames (default 120), save the last frame as PNG, exit\n"
 			"  --frames <n>          frame count for --screenshot\n"
 			"  --no-vsync            do not wait for vertical sync\n"
@@ -68,6 +74,7 @@ namespace {
 			else if (arg == "--no-vsync") options.NoVSync = true;
 			else if (arg == "--screenshot") { if (!value(options.ScreenshotPath)) return false; }
 			else if (arg == "--export") { if (!value(options.ExportDirectory)) return false; }
+			else if (arg == "--runtime") { if (!value(options.RuntimeExecutable)) return false; }
 			else if (arg == "--frames")
 			{
 				std::string text;
@@ -86,13 +93,26 @@ namespace {
 		return true;
 	}
 
-	std::string ExecutableDirectory(const char* argv0)
+	// Full path of the running executable (used to find game.lumen next to it and to export the runtime itself).
+	fs::path ExecutablePath(const char* argv0)
 	{
 		std::error_code ec;
+#ifdef _WIN32
+		wchar_t buffer[32768];
+		const DWORD length = GetModuleFileNameW(nullptr, buffer, static_cast<DWORD>(std::size(buffer)));
+		if (length > 0 && length < std::size(buffer))
+			return fs::path(std::wstring(buffer, length));
+#else
 		fs::path exe = fs::read_symlink("/proc/self/exe", ec);
-		if (ec)
-			exe = fs::absolute(argv0, ec);
-		return exe.parent_path().string();
+		if (!ec)
+			return exe;
+#endif
+		return fs::absolute(argv0, ec);
+	}
+
+	std::string ExecutableDirectory(const char* argv0)
+	{
+		return ExecutablePath(argv0).parent_path().string();
 	}
 
 	std::string ResolveProjectFile(const Options& options, const std::string& exeDirectory)
@@ -121,10 +141,10 @@ int main(int argc, char** argv)
 
 	if (!options.ExportDirectory.empty())
 	{
-		std::error_code ec;
-		const fs::path self = fs::read_symlink("/proc/self/exe", ec);
+		// By default the running executable is the runtime to ship; --runtime picks another (e.g. a Windows build).
+		const std::string runtime = options.RuntimeExecutable.empty() ? ExecutablePath(argv[0]).string() : options.RuntimeExecutable;
 		std::string error;
-		if (!ExportProject(projectFile, options.ExportDirectory, ec ? argv[0] : self.string(), &error))
+		if (!ExportProject(projectFile, options.ExportDirectory, runtime, &error))
 		{
 			std::fprintf(stderr, "Export failed: %s\n", error.c_str());
 			return 1;
@@ -200,7 +220,7 @@ int main(int argc, char** argv)
 
 		if (!window->BeginFrame())
 		{
-			glfwWaitEventsTimeout(0.05); // minimized or resizing
+			window->WaitForEvents(0.05); // minimized or resizing
 			continue;
 		}
 		if (!ensureRenderer())
@@ -222,7 +242,7 @@ int main(int argc, char** argv)
 		if (sinceTitle >= 0.5f)
 		{
 			const std::string title = project.WindowTitle + "  -  " + std::to_string(static_cast<int>(static_cast<float>(titleFrames) / sinceTitle + 0.5f)) + " FPS";
-			glfwSetWindowTitle(window->GetNativeHandle(), title.c_str());
+			window->SetTitle(title);
 			titleTime = now;
 			titleFrames = 0;
 		}

@@ -44,6 +44,10 @@ namespace Lumen {
 		// Processes OS events and updates the input state (edges are cleared first).
 		void PollEvents();
 
+		void SetTitle(const std::string& title);
+		// Blocks until an event arrives or `seconds` pass (use while minimized so the loop does not spin).
+		void WaitForEvents(double seconds);
+
 		// Size of the drawable area in pixels (0 while minimized).
 		uint32_t GetWidth() const;
 		uint32_t GetHeight() const;

@@ -4,3 +4,4 @@ build/
 .vs/
 .idea/
 build-release/
+build-win/
